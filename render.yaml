@@ -38,7 +38,7 @@ services:
       - key: TRAINING_TICKERS_FILE
         value: scripts/sample_data/tickers.txt
       - key: SECRET_KEY
-        sync: false
+        generateValue: true
       - key: FRONTEND_URL
         sync: false
       - key: ALLOWED_ORIGINS
