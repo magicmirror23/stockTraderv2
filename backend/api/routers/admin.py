@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import threading
 from datetime import datetime, timezone
@@ -60,7 +61,12 @@ def _require_auth(authorization: str = Header(None)):
 def _run_train_sync(progress_callback=None) -> dict:
     """Run training in a thread – never call from the event loop directly."""
     from backend.prediction_engine.training.trainer import train
-    return train(progress_callback=progress_callback)
+    try:
+        if progress_callback is not None and "progress_callback" in inspect.signature(train).parameters:
+            return train(progress_callback=progress_callback)
+    except (TypeError, ValueError):
+        logger.debug("Could not inspect trainer signature; falling back to plain train() call")
+    return train()
 
 
 def _update_retrain_progress(stage: str, percent: int, message: str) -> None:
