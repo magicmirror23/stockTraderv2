@@ -1,8 +1,8 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { interval, Subscription } from 'rxjs';
-import { AdminApiService, ModelStatus, DriftResult, CanaryStatus, ModelVersion, RetrainStatus } from '../services/admin-api.service';
+import { AdminApiService, ModelStatus, DriftResult, CanaryStatus, ModelVersion, RetrainStatus, RetrainLogEntry } from '../services/admin-api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -78,6 +78,20 @@ import { NotificationService } from '../services/notification.service';
             <div class="text-sm text-sell mt-1" *ngIf="retrainStatus?.error">
               {{ retrainStatus?.error }}
             </div>
+          </div>
+
+          <div class="card mb-2">
+            <div class="flex items-center justify-between">
+              <h3>Training Log</h3>
+              <button (click)="loadRetrainLogs(true)" [disabled]="!auth.isAuthenticated">Refresh Log</button>
+            </div>
+            <p class="text-muted text-sm" *ngIf="!auth.isAuthenticated">
+              Set the admin token to view retrain logs.
+            </p>
+            <p class="text-muted text-sm" *ngIf="auth.isAuthenticated && retrainLogs.length === 0">
+              No retrain logs yet.
+            </p>
+            <pre class="train-log" *ngIf="auth.isAuthenticated && retrainLogs.length > 0">{{ retrainLogs.join('\n') }}</pre>
           </div>
         </div>
       </div>
@@ -202,9 +216,22 @@ import { NotificationService } from '../services/notification.service';
     @media (max-width: 768px) {
       .grid-4 { grid-template-columns: repeat(2, 1fr); }
     }
+
+    .train-log {
+      max-height: 320px;
+      overflow: auto;
+      padding: 1rem;
+      border-radius: 12px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
   `]
 })
-export class AdminComponent implements OnInit {
+export class AdminComponent implements OnInit, OnDestroy {
   tokenInput = '';
   activeTab: 'model' | 'drift' | 'registry' | 'canary' = 'model';
 
@@ -223,6 +250,8 @@ export class AdminComponent implements OnInit {
 
   canary: CanaryStatus | null = null;
   canaryLoading = false;
+  retrainLogs: string[] = [];
+  retrainLogCursor = 0;
   private retrainPollSub?: Subscription;
 
   constructor(
@@ -234,6 +263,13 @@ export class AdminComponent implements OnInit {
   ngOnInit(): void {
     this.loadModelStatus();
     this.loadRetrainStatus();
+    if (this.auth.isAuthenticated) {
+      this.loadRetrainLogs(true);
+    }
+  }
+
+  ngOnDestroy(): void {
+    this.stopRetrainPolling();
   }
 
   setToken(): void {
@@ -241,6 +277,7 @@ export class AdminComponent implements OnInit {
       this.auth.setToken(this.tokenInput.trim());
       this.tokenInput = '';
       this.notify.success('Admin token saved.');
+      this.loadRetrainLogs(true);
     }
   }
 
@@ -269,6 +306,8 @@ export class AdminComponent implements OnInit {
     this.adminApi.triggerRetrain().subscribe({
       next: () => {
         this.notify.success('Retrain started. The page will keep checking progress.');
+        this.retrainLogs = [];
+        this.retrainLogCursor = 0;
         this.startRetrainPolling();
       },
       error: () => { this.retraining = false; }
@@ -280,13 +319,35 @@ export class AdminComponent implements OnInit {
       next: status => {
         this.retrainStatus = status;
         this.retraining = status.running;
+        if (this.auth.isAuthenticated) {
+          this.loadRetrainLogs();
+        }
         if (!status.running && this.retrainPollSub) {
+          this.loadRetrainLogs();
           this.stopRetrainPolling();
           this.loadModelStatus();
           if (status.progress === 'done') {
             this.notify.success('Retrain completed successfully.');
           }
         }
+      }
+    });
+  }
+
+  loadRetrainLogs(reset: boolean = false): void {
+    if (!this.auth.isAuthenticated) {
+      return;
+    }
+    const after = reset ? 0 : this.retrainLogCursor;
+    if (reset) {
+      this.retrainLogs = [];
+      this.retrainLogCursor = 0;
+    }
+    this.adminApi.getRetrainLogs(after).subscribe({
+      next: response => {
+        const newLines = response.entries.map(entry => this.formatRetrainLog(entry));
+        this.retrainLogs = reset ? newLines : [...this.retrainLogs, ...newLines];
+        this.retrainLogCursor = response.next_cursor;
       }
     });
   }
@@ -302,6 +363,10 @@ export class AdminComponent implements OnInit {
     this.retraining = false;
     this.retrainPollSub?.unsubscribe();
     this.retrainPollSub = undefined;
+  }
+
+  private formatRetrainLog(entry: RetrainLogEntry): string {
+    return `[${entry.timestamp}] ${entry.level} ${entry.logger} - ${entry.message}`;
   }
 
   loadDrift(): void {

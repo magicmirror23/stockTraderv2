@@ -54,6 +54,21 @@ export interface RetrainStatus {
   last_finished_at?: string | null;
 }
 
+export interface RetrainLogEntry {
+  id: number;
+  timestamp: string;
+  level: string;
+  logger: string;
+  message: string;
+}
+
+export interface RetrainLogsResponse {
+  entries: RetrainLogEntry[];
+  next_cursor: number;
+  running: boolean;
+  progress: string | null;
+}
+
 @Injectable({ providedIn: 'root' })
 export class AdminApiService {
   private readonly base = environment.apiUrl;
@@ -74,6 +89,10 @@ export class AdminApiService {
 
   getRetrainStatus(): Observable<RetrainStatus> {
     return this.http.get<RetrainStatus>(`${this.base}/retrain/status`);
+  }
+
+  getRetrainLogs(after: number = 0): Observable<RetrainLogsResponse> {
+    return this.http.get<RetrainLogsResponse>(`${this.base}/retrain/logs?after=${after}`);
   }
 
   getRegistryVersions(): Observable<ModelVersion[]> {
