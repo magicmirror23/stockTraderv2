@@ -32,10 +32,7 @@ docker-compose.override.yml
 htmlcov/
 .coverage
 
-# Model artifacts (large binaries)
-models/artifacts/
-!models/artifacts/.gitkeep
-!models/registry.json
+# Model registry and trained artifacts are committed for free Render deployments
 
 # Downloaded data
 storage/backtests/*/
