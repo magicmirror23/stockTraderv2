@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -22,7 +23,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["admin"])
 
 # Track retrain state so the frontend can poll progress
-_retrain_status: dict = {"running": False, "progress": None, "error": None}
+_retrain_status: dict[str, Any] = {
+    "running": False,
+    "progress": None,
+    "error": None,
+    "message": None,
+    "model_version": None,
+    "metrics": None,
+    "data_refresh": None,
+    "last_started_at": None,
+    "last_finished_at": None,
+}
 
 
 def _require_auth(authorization: str = Header(None)):
@@ -37,29 +48,10 @@ def _run_train_sync() -> dict:
     return train()
 
 
-@router.get("/retrain/status")
-async def retrain_status():
-    """Poll retrain progress without blocking."""
-    return _retrain_status
-
-
-@router.post("/retrain")
-async def retrain(token: str = Depends(_require_auth)):
-    """Trigger a model retrain.
-
-    Training runs in a background thread so the event loop stays responsive
-    for live-chart, bot, and other endpoints.
-    """
-    if _retrain_status["running"]:
-        return {"message": "Retrain already in progress", "status": "running"}
-
-    _retrain_status.update(running=True, progress="training", error=None)
-
+async def _run_retrain_background() -> None:
     try:
-        loop = asyncio.get_event_loop()
-        entry = await loop.run_in_executor(None, _run_train_sync)
+        entry = await asyncio.to_thread(_run_train_sync)
 
-        # Log to MLflow (non-critical)
         try:
             from backend.services.mlflow_registry import log_model_training
             log_model_training(
@@ -71,26 +63,74 @@ async def retrain(token: str = Depends(_require_auth)):
         except Exception:
             logger.debug("MLflow logging skipped")
 
-        # Reload the freshly trained model
         mgr = ModelManager()
         mgr.load_latest()
 
         record_retrain("success")
-        _retrain_status.update(running=False, progress="done", error=None)
-
-        return {
-            "message": "Retrain completed",
-            "model_version": entry["version"],
-            "metrics": entry["metrics"],
-            "data_refresh": entry.get("data_refresh", {}),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        _retrain_status.update(
+            running=False,
+            progress="done",
+            error=None,
+            message="Retrain completed",
+            model_version=entry["version"],
+            metrics=entry.get("metrics"),
+            data_refresh=entry.get("data_refresh"),
+            last_finished_at=datetime.now(timezone.utc).isoformat(),
+        )
     except Exception as exc:
         logger.exception("Retrain failed")
         record_retrain("failed")
         capture_exception(exc)
-        _retrain_status.update(running=False, progress="failed", error=str(exc))
-        raise HTTPException(status_code=500, detail=str(exc))
+        _retrain_status.update(
+            running=False,
+            progress="failed",
+            error=str(exc),
+            message="Retrain failed",
+            last_finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+
+@router.get("/retrain/status")
+async def retrain_status():
+    """Poll retrain progress without blocking."""
+    return _retrain_status
+
+
+@router.post("/retrain")
+async def retrain(token: str = Depends(_require_auth)):
+    """Trigger a model retrain.
+
+    Returns immediately and performs training in the background so
+    free-hosted deployments do not hit request timeouts.
+    """
+    if _retrain_status["running"]:
+        return {
+            "message": "Retrain already in progress",
+            "status": "running",
+            "progress": _retrain_status["progress"],
+            "last_started_at": _retrain_status["last_started_at"],
+        }
+
+    _retrain_status.update(
+        running=True,
+        progress="queued",
+        error=None,
+        message="Retrain started",
+        model_version=None,
+        metrics=None,
+        data_refresh=None,
+        last_started_at=datetime.now(timezone.utc).isoformat(),
+        last_finished_at=None,
+    )
+
+    asyncio.create_task(_run_retrain_background())
+
+    return {
+        "message": "Retrain started",
+        "status": "queued",
+        "progress": "queued",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.get("/metrics", response_class=PlainTextResponse)

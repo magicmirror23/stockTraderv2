@@ -1,7 +1,8 @@
 import { Component, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { AdminApiService, ModelStatus, DriftResult, CanaryStatus, ModelVersion } from '../services/admin-api.service';
+import { interval, Subscription } from 'rxjs';
+import { AdminApiService, ModelStatus, DriftResult, CanaryStatus, ModelVersion, RetrainStatus } from '../services/admin-api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -67,6 +68,15 @@ import { NotificationService } from '../services/notification.service';
                 {{ retraining ? 'Retraining...' : 'Trigger Retrain' }}
               </button>
               <button (click)="loadModelStatus()">Refresh Status</button>
+            </div>
+            <div class="text-sm text-muted mt-1" *ngIf="retrainStatus">
+              Retrain status:
+              <strong>{{ retrainStatus.progress || (retrainStatus.running ? 'running' : 'idle') }}</strong>
+              <span *ngIf="retrainStatus.last_started_at"> | started {{ retrainStatus.last_started_at | date:'medium' }}</span>
+              <span *ngIf="retrainStatus.last_finished_at"> | finished {{ retrainStatus.last_finished_at | date:'medium' }}</span>
+            </div>
+            <div class="text-sm text-sell mt-1" *ngIf="retrainStatus?.error">
+              {{ retrainStatus?.error }}
             </div>
           </div>
         </div>
@@ -202,6 +212,7 @@ export class AdminComponent implements OnInit {
   modelLoading = false;
   reloading = false;
   retraining = false;
+  retrainStatus: RetrainStatus | null = null;
 
   drift: DriftResult | null = null;
   driftLoading = false;
@@ -212,6 +223,7 @@ export class AdminComponent implements OnInit {
 
   canary: CanaryStatus | null = null;
   canaryLoading = false;
+  private retrainPollSub?: Subscription;
 
   constructor(
     public auth: AuthService,
@@ -221,6 +233,7 @@ export class AdminComponent implements OnInit {
 
   ngOnInit(): void {
     this.loadModelStatus();
+    this.loadRetrainStatus();
   }
 
   setToken(): void {
@@ -255,12 +268,40 @@ export class AdminComponent implements OnInit {
     this.retraining = true;
     this.adminApi.triggerRetrain().subscribe({
       next: () => {
-        this.retraining = false;
-        this.notify.success('Retrain triggered successfully.');
-        this.loadModelStatus();
+        this.notify.success('Retrain started. The page will keep checking progress.');
+        this.startRetrainPolling();
       },
       error: () => { this.retraining = false; }
     });
+  }
+
+  loadRetrainStatus(): void {
+    this.adminApi.getRetrainStatus().subscribe({
+      next: status => {
+        this.retrainStatus = status;
+        this.retraining = status.running;
+        if (!status.running && this.retrainPollSub) {
+          this.stopRetrainPolling();
+          this.loadModelStatus();
+          if (status.progress === 'done') {
+            this.notify.success('Retrain completed successfully.');
+          }
+        }
+      }
+    });
+  }
+
+  startRetrainPolling(): void {
+    this.stopRetrainPolling();
+    this.retraining = true;
+    this.loadRetrainStatus();
+    this.retrainPollSub = interval(5000).subscribe(() => this.loadRetrainStatus());
+  }
+
+  stopRetrainPolling(): void {
+    this.retraining = false;
+    this.retrainPollSub?.unsubscribe();
+    this.retrainPollSub = undefined;
   }
 
   loadDrift(): void {

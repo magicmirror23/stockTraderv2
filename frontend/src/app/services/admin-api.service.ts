@@ -42,6 +42,18 @@ export interface CanaryStatus {
   stable_accuracy: number | null;
 }
 
+export interface RetrainStatus {
+  running: boolean;
+  progress: string | null;
+  error: string | null;
+  message?: string | null;
+  model_version?: string | null;
+  metrics?: Record<string, unknown> | null;
+  data_refresh?: Record<string, unknown> | null;
+  last_started_at?: string | null;
+  last_finished_at?: string | null;
+}
+
 @Injectable({ providedIn: 'root' })
 export class AdminApiService {
   private readonly base = environment.apiUrl;
@@ -58,6 +70,10 @@ export class AdminApiService {
 
   triggerRetrain(): Observable<Record<string, unknown>> {
     return this.http.post<Record<string, unknown>>(`${this.base}/retrain`, {});
+  }
+
+  getRetrainStatus(): Observable<RetrainStatus> {
+    return this.http.get<RetrainStatus>(`${this.base}/retrain/status`);
   }
 
   getRegistryVersions(): Observable<ModelVersion[]> {
