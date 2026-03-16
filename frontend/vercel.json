@@ -2,7 +2,7 @@
   "framework": "angular",
   "buildCommand": "npx ng build --configuration production",
   "outputDirectory": "dist/stocktrader-frontend/browser",
-  "installCommand": "npm ci",
+  "installCommand": "npm ci --legacy-peer-deps",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ],
