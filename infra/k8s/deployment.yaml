@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stocktrader-api
+  labels:
+    app: stocktrader
+    component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: stocktrader
+      component: api
+  template:
+    metadata:
+      labels:
+        app: stocktrader
+        component: api
+    spec:
+      containers:
+        - name: api
+          image: REGISTRY_PLACEHOLDER/stocktrader-api:IMAGE_TAG_PLACEHOLDER
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: stocktrader-secrets
+            - configMapRef:
+                name: stocktrader-config
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stocktrader-api
+spec:
+  selector:
+    app: stocktrader
+    component: api
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stocktrader-config
+data:
+  APP_ENV: "production"
+  ALLOWED_ORIGINS: "https://yourdomain.com"
+  PAPER_MODE: "false"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stocktrader-secrets
+type: Opaque
+stringData:
+  DATABASE_URL: "REPLACE_WITH_VAULT_OR_CLOUD_SECRET"
+  REDIS_URL: "REPLACE_WITH_VAULT_OR_CLOUD_SECRET"
+  SECRET_KEY: "REPLACE_WITH_VAULT_OR_CLOUD_SECRET"

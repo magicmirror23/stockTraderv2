@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: stocktrader-api
+    runtime: python
+    plan: free
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: API_V1_PREFIX
+        value: /api/v1
+      - key: PAPER_MODE
+        value: "true"
+      - key: ENABLE_DEMO_MODE
+        value: "true"
+      - key: ENABLE_REPLAY_FALLBACK
+        value: "true"
+      - key: ENABLE_LIVE_BROKER
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: MODEL_REGISTRY_PATH
+        value: models/registry.json
+      - key: STORAGE_PATH
+        value: storage
+      - key: TRAINING_DATA_LOOKBACK_DAYS
+        value: "730"
+      - key: TRAINING_DATA_MAX_AGE_DAYS
+        value: "3"
+      - key: TRAINING_TICKERS_FILE
+        value: scripts/sample_data/tickers.txt
+      - key: SECRET_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+# Optional future upgrades:
+# databases:
+#   - name: stocktrader-db
+#     plan: free
+#
+# services:
+#   - type: redis
+#     name: stocktrader-redis
+#     plan: starter

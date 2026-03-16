@@ -1,0 +1,54 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual env
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+
+# SQLite dev database
+*.db
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# pytest
+.pytest_cache/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Model artifacts (large binaries)
+models/artifacts/
+!models/artifacts/.gitkeep
+!models/registry.json
+
+# Downloaded data
+storage/backtests/*/
+storage/angel_tokens.json
+
+# Node modules
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
+
+# Logs
+logs/
+
+# Feature store manifest (auto-generated)
+backend/prediction_engine/feature_store/manifest.json

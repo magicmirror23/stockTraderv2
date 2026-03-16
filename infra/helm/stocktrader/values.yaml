@@ -1,0 +1,41 @@
+replicaCount: 2
+
+image:
+  repository: REGISTRY_PLACEHOLDER/stocktrader-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+env:
+  APP_ENV: production
+  PAPER_MODE: "false"
+
+secrets:
+  # These should be managed via Vault, AWS Secrets Manager, etc.
+  DATABASE_URL: ""
+  REDIS_URL: ""
+  SECRET_KEY: ""
+
+healthcheck:
+  path: /api/v1/health
+  port: 8000
+  initialDelaySeconds: 10
+  periodSeconds: 10
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70

@@ -1,0 +1,48 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "requirements.txt"
+      - "render.yaml"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "requirements.txt"
+      - "render.yaml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest ruff
+      - name: Lint backend
+        run: ruff check backend --line-length 120
+      - name: Verify startup import
+        env:
+          APP_ENV: testing
+          PAPER_MODE: "true"
+          ENABLE_DEMO_MODE: "true"
+          ENABLE_REPLAY_FALLBACK: "true"
+        run: python -c "from backend.api.main import app; print(app.title)"
+      - name: Run tests
+        env:
+          APP_ENV: testing
+          PAPER_MODE: "true"
+          ENABLE_DEMO_MODE: "true"
+          ENABLE_REPLAY_FALLBACK: "true"
+          ENABLE_LIVE_BROKER: "false"
+        run: pytest backend/tests -q

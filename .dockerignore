@@ -1,0 +1,45 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.db
+.pytest_cache
+htmlcov
+.coverage
+.venv
+venv
+
+# Git / CI
+.git
+.github
+.gitignore
+
+# Environment
+.env
+.env.local
+
+# Node (rebuilt in Docker)
+node_modules
+frontend/node_modules
+frontend/.angular
+frontend/dist
+
+# Large / unnecessary
+logs/
+models/artifacts/
+storage/backtests/
+notebooks/
+docs/
+infra/
+e2e/
+
+# IDE
+.vscode
+.idea
+
+# Build artifacts
+*.egg-info
+
+# Config files not needed in image
+docker-compose*.yml
+backend/fly.toml

@@ -1,0 +1,4 @@
+Node.js version v25.8.1 detected.
+Odd numbered Node.js versions will not enter LTS status and should not be used for production. For more information, please see https://nodejs.org/en/about/previous-releases/.
+[1m[33mComponent HMR has been enabled, see https://angular.dev/hmr for more info.[39m[22m
+^C^C

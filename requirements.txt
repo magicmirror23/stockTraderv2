@@ -1,0 +1,39 @@
+# Core API
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.34,<1.0
+pydantic>=2.10,<3.0
+pydantic-settings>=2.7,<3.0
+python-dotenv>=1.0,<2.0
+websockets>=14.0,<15.0
+
+# Database
+sqlalchemy>=2.0,<3.0
+psycopg2-binary>=2.9,<3.0
+
+# Async jobs and cache (optional at runtime)
+celery>=5.4,<6.0
+redis>=5.0,<6.0
+
+# Data and ML
+pandas>=2.2,<3.0
+numpy>=2.2,<3.0
+yfinance>=0.2,<1.0
+scipy>=1.15,<2.0
+lightgbm>=4.5,<5.0
+xgboost>=2.1,<3.0
+scikit-learn>=1.6,<2.0
+optuna>=4.2,<5.0
+shap>=0.46,<1.0
+
+# Monitoring and observability
+prometheus-client>=0.21,<1.0
+sentry-sdk[fastapi]>=2.0,<3.0
+
+# Broker integrations
+smartapi-python>=1.4,<2.0
+pyotp>=2.9,<3.0
+websocket-client>=1.8,<2.0
+
+# HTTP clients
+requests>=2.32,<3.0
+httpx>=0.28,<1.0

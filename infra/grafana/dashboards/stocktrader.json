@@ -1,0 +1,130 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Prediction Requests Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(stocktrader_prediction_requests_total[5m])",
+          "legendFormat": "{{endpoint}}"
+        }
+      ]
+    },
+    {
+      "title": "Prediction Latency (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(stocktrader_prediction_latency_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(stocktrader_prediction_latency_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(stocktrader_prediction_latency_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Model Accuracy",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "stocktrader_model_accuracy" }
+      ]
+    },
+    {
+      "title": "Trade Executions",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 8 },
+      "targets": [
+        {
+          "expr": "rate(stocktrader_trade_executions_total[5m])",
+          "legendFormat": "{{side}}-{{status}}"
+        }
+      ]
+    },
+    {
+      "title": "Option Signals by Type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "rate(stocktrader_option_signals_total[5m])",
+          "legendFormat": "{{option_type}}-{{action}}"
+        }
+      ]
+    },
+    {
+      "title": "Option Strategy Intents",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "stocktrader_option_strategy_total",
+          "legendFormat": "{{strategy}}"
+        }
+      ]
+    },
+    {
+      "title": "Paper Replay Runs",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "stocktrader_replay_runs_total" }
+      ]
+    },
+    {
+      "title": "Replay Duration (p95)",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(stocktrader_replay_duration_seconds_bucket[5m]))"
+        }
+      ]
+    },
+    {
+      "title": "Drift Detections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "rate(stocktrader_drift_detected_total[1h])",
+          "legendFormat": "{{feature}}-{{test_type}}"
+        }
+      ]
+    },
+    {
+      "title": "Retrain Status",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "stocktrader_retrain_runs_total",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["stocktrader", "models", "options"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "StockTrader Model & Options Dashboard",
+  "uid": "stocktrader-main"
+}
