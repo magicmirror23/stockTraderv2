@@ -20,7 +20,7 @@ def trained_model(tmp_path):
         "f2": np.random.randn(n),
         "f3": np.random.randn(n),
     })
-    y = pd.Series(np.random.choice([0, 1, 2], size=n))
+    y = pd.Series(np.random.choice([0, 1], size=n))
 
     model = LightGBMModel(seed=42)
     model.train(X, y, num_boost_round=10)
@@ -37,17 +37,18 @@ def test_predict_shape(trained_model):
 def test_predict_proba_shape(trained_model):
     model, X = trained_model
     proba = model.predict_proba(X)
-    assert proba.shape == (len(X), 3)
-    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
+    assert proba.shape == (len(X),)
+    assert np.all((proba >= 0.0) & (proba <= 1.0))
 
 
 def test_predict_with_expected_return(trained_model):
     model, X = trained_model
-    results = model.predict_with_expected_return(X)
+    results = model.predict_with_expected_return(X, price=100.0, quantity=5)
     assert len(results) == len(X)
     for r in results:
         assert r["action"] in ("buy", "sell", "hold")
         assert 0.0 <= r["confidence"] <= 1.0
+        assert "net_expected_return" in r
 
 
 def test_save_load_roundtrip(trained_model, tmp_path):

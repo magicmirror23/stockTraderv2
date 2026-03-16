@@ -93,7 +93,7 @@ def volatility(series: pd.Series, window: int = 20) -> pd.Series:
 
 def returns(series: pd.Series, period: int = 1) -> pd.Series:
     """Simple percentage returns."""
-    return series.pct_change(periods=period)
+    return series.pct_change(periods=period, fill_method=None)
 
 
 def log_returns(series: pd.Series, period: int = 1) -> pd.Series:
@@ -325,7 +325,7 @@ def return_skew(series: pd.Series, window: int = 10) -> pd.Series:
 
 def volume_change(volume: pd.Series) -> pd.Series:
     """Percentage change in volume."""
-    return volume.pct_change()
+    return volume.pct_change(fill_method=None)
 
 
 def close_to_sma(series: pd.Series, window: int = 20) -> pd.Series:
@@ -343,8 +343,30 @@ def day_of_week(df: pd.DataFrame) -> pd.Series:
 
 def lagged_return_shift(series: pd.Series, lag: int = 1) -> pd.Series:
     """Lagged returns — returns shifted by *lag* periods (look-back)."""
-    ret = series.pct_change()
+    ret = series.pct_change(fill_method=None)
     return ret.shift(lag)
+
+
+def rolling_beta(
+    series: pd.Series,
+    benchmark: pd.Series,
+    window: int = 20,
+    min_periods: int = 10,
+) -> pd.Series:
+    """Rolling beta of a series versus a benchmark return series."""
+    cov = series.rolling(window=window, min_periods=min_periods).cov(benchmark)
+    var = benchmark.rolling(window=window, min_periods=min_periods).var()
+    return cov / var.replace(0, np.nan)
+
+
+def rolling_correlation(
+    series: pd.Series,
+    benchmark: pd.Series,
+    window: int = 20,
+    min_periods: int = 10,
+) -> pd.Series:
+    """Rolling correlation between a series and benchmark return series."""
+    return series.rolling(window=window, min_periods=min_periods).corr(benchmark)
 
 
 # ---------------------------------------------------------------------------

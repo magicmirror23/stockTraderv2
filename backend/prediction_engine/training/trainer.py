@@ -24,9 +24,14 @@ from sklearn.preprocessing import StandardScaler
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
-from backend.prediction_engine.feature_store.feature_store import build_features  # noqa: E402
+from backend.prediction_engine.feature_store.feature_store import (  # noqa: E402
+    NEWS_AGGREGATE_FEATURE_COLUMNS,
+    build_features,
+)
+from backend.prediction_engine.data_pipeline.connector_news import topic_feature_columns  # noqa: E402
 from backend.prediction_engine.models.lightgbm_model import LightGBMModel  # noqa: E402
 from backend.core.config import settings  # noqa: E402
+from backend.services.brokerage_calculator import TradeType, calculate_charges  # noqa: E402
 from backend.services.training_data import ensure_training_data, load_training_tickers  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -43,7 +48,12 @@ ProgressCallback = Callable[[str, int, str], None]
 # Label construction
 # ---------------------------------------------------------------------------
 
-def _build_labels(df: pd.DataFrame, horizon: int = 3, threshold: float = 0.001) -> pd.Series:
+def _build_labels(
+    df: pd.DataFrame,
+    horizon: int = 3,
+    threshold: float = 0.001,
+    vol_scale: float = 0.35,
+) -> pd.Series:
     """Create binary labels based on future returns for direction prediction.
 
     Uses simple direction of future returns to create a binary classification
@@ -59,10 +69,14 @@ def _build_labels(df: pd.DataFrame, horizon: int = 3, threshold: float = 0.001) 
     future_ret = df.groupby("ticker")["close"].transform(
         lambda s: s.shift(-horizon) / s - 1
     )
+    dynamic_threshold = pd.Series(threshold, index=df.index, dtype=float)
+    if "volatility_20" in df.columns:
+        daily_vol = (df["volatility_20"] / np.sqrt(252)).clip(lower=0).fillna(0.0)
+        dynamic_threshold = np.maximum(dynamic_threshold.values, (daily_vol * vol_scale).values)
 
     labels = pd.Series(np.nan, index=df.index)
-    labels[future_ret > threshold] = 1   # up
-    labels[future_ret < -threshold] = 0  # down
+    labels[future_ret > dynamic_threshold] = 1   # up
+    labels[future_ret < -dynamic_threshold] = 0  # down
     return labels
 
 
@@ -71,6 +85,8 @@ _BOUNDED_FEATURES = {
     "rsi_14", "bb_pct_b", "stoch_k", "stoch_d", "williams_r",
     "price_pos_52w", "volume_spike", "rsi_divergence",
     "high_low_ratio", "close_to_ma20", "close_to_ma50", "day_of_week",
+    "breadth_up_ratio", "breadth_above_sma50", "news_geopolitical_risk_30d",
+    *{col for col in [*topic_feature_columns(), *NEWS_AGGREGATE_FEATURE_COLUMNS] if "sentiment" in col},
 }
 
 
@@ -84,10 +100,50 @@ def _normalize_features_per_ticker(df: pd.DataFrame, feature_cols: list[str]) ->
     for col in feature_cols:
         if col in df.columns and col not in _BOUNDED_FEATURES:
             df[col] = df.groupby("ticker")[col].transform(
-                lambda s: (s - s.rolling(60, min_periods=20).mean())
-                / s.rolling(60, min_periods=20).std().replace(0, np.nan)
+                _rolling_zscore_or_zero
             )
     return df
+
+
+def _rolling_zscore_or_zero(series: pd.Series, window: int = 60, min_periods: int = 20) -> pd.Series:
+    """Rolling z-score that preserves warm-up NaNs but keeps flat windows at 0.
+
+    Constant columns are common for sparse news features.  Those windows should
+    be treated as neutral rather than making the entire training set invalid.
+    """
+    mean = series.rolling(window, min_periods=min_periods).mean()
+    std = series.rolling(window, min_periods=min_periods).std()
+    normalized = (series - mean) / std.replace(0, np.nan)
+
+    warmup_mask = mean.isna() | std.isna()
+    flat_mask = (~warmup_mask) & std.le(0)
+    normalized = normalized.mask(flat_mask, 0.0)
+    return normalized
+
+
+def _prepare_training_frame(features: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    """Build labels, normalize features, and validate the usable training rows."""
+    features = features.copy()
+    features["future_return"] = features.groupby("ticker")["close"].transform(
+        lambda s: s.shift(-horizon) / s - 1
+    )
+    features["label"] = _build_labels(features, horizon=horizon)
+    features = features.dropna(subset=["label"]).reset_index(drop=True)
+    features["label"] = features["label"].astype(int)
+
+    if features.empty:
+        raise ValueError("No labelled samples remained after applying the training horizon")
+
+    features = _normalize_features_per_ticker(features, NUMERIC_FEATURES)
+    features = features.dropna(subset=NUMERIC_FEATURES).reset_index(drop=True)
+
+    if features.empty:
+        raise ValueError(
+            "No usable training samples remained after feature normalization; "
+            "check sparse or constant feature columns"
+        )
+
+    return features
 
 
 def _compute_class_weights(y: pd.Series) -> np.ndarray:
@@ -145,6 +201,16 @@ NUMERIC_FEATURES = [
     "return_mean_5", "return_mean_10", "return_skew_10",
     "volume_change", "close_to_ma20", "close_to_ma50",
     "return_lag_1", "return_lag_5", "day_of_week",
+    # Market, macro, and regime context
+    "market_return_1d", "market_return_5d", "market_trend_20", "market_volatility_20",
+    "india_vix_close", "india_vix_return_5d", "usd_inr_return_5d",
+    "brent_return_5d", "gold_return_5d", "sp500_return_1d", "us10y_change_5d",
+    "macro_stress_score", "breadth_up_ratio", "breadth_above_sma50",
+    "market_median_return_1d", "market_dispersion_5d",
+    "excess_return_1d", "excess_return_5d", "rolling_beta_20", "rolling_corr_20",
+    # News and event context
+    *topic_feature_columns(),
+    *NEWS_AGGREGATE_FEATURE_COLUMNS,
 ]
 
 
@@ -190,17 +256,9 @@ def train(
 
     _emit_progress(progress_callback, "building_features", 45, "Building training features")
     logger.info("Building features for %d tickers …", len(tickers))
-    features = build_features(tickers, data_dir=data_dir)
+    features = build_features(tickers, data_dir=data_dir, news_mode="training")
 
-    # Add labels
-    features = features.copy()
-    features["label"] = _build_labels(features, horizon=horizon)
-    features = features.dropna(subset=["label"]).reset_index(drop=True)
-    features["label"] = features["label"].astype(int)
-
-    # Normalize features per-ticker to remove scale effects
-    features = _normalize_features_per_ticker(features, NUMERIC_FEATURES)
-    features = features.dropna(subset=NUMERIC_FEATURES).reset_index(drop=True)
+    features = _prepare_training_frame(features, horizon=horizon)
 
     # Log class distribution
     class_dist = features["label"].value_counts().sort_index()
@@ -216,6 +274,9 @@ def train(
     y_val = val_df["label"]
     X_test = test_df[NUMERIC_FEATURES]
     y_test = test_df["label"]
+    future_returns_test = test_df["future_return"].fillna(0.0).values
+    close_prices_test = test_df["close"].ffill().fillna(0.0).values
+    dates_test = test_df["date"].values
 
     # Compute class weights to handle imbalanced labels
     sample_weights = _compute_class_weights(y_train)
@@ -245,7 +306,7 @@ def train(
         test_proba = test_proba[:, 1] if test_proba.shape[1] == 2 else test_proba[:, 0]
 
     # Optimal threshold search (demo.py strategy)
-    best_thresh, best_acc = _find_optimal_threshold(test_proba, y_test.values)
+    best_thresh, best_score = _find_utility_threshold(test_proba, y_test.values, future_returns_test)
     test_binary_preds = (test_proba >= best_thresh).astype(int)
     binary_accuracy = float((test_binary_preds == y_test.values).mean())
     binary_f1 = float(f1_score(y_test.values, test_binary_preds, average="binary", zero_division=0))
@@ -260,11 +321,43 @@ def train(
     metrics["test_precision"] = binary_precision
     metrics["test_recall"] = binary_recall
     metrics["optimal_threshold"] = best_thresh
+    metrics["threshold_utility_score"] = best_score
     logger.info("Optimal threshold: %.2f", best_thresh)
     logger.info("Binary direction accuracy: %.4f | F1: %.4f | Precision: %.4f | Recall: %.4f",
                 binary_accuracy, binary_f1, binary_precision, binary_recall)
     logger.info("3-class mapping: buy=%d, hold=%d, sell=%d",
                 (test_3class == 2).sum(), (test_3class == 1).sum(), (test_3class == 0).sum())
+
+    policy = _find_optimal_signal_policy(
+        test_proba,
+        y_test.values,
+        future_returns_test,
+        close_prices_test,
+        dates_test,
+    )
+    metrics["buy_threshold"] = policy["buy_threshold"]
+    metrics["sell_threshold"] = policy["sell_threshold"]
+    metrics["min_signal_confidence"] = policy["min_signal_confidence"]
+    metrics["strategy_gross_return"] = policy["gross_return"]
+    metrics["strategy_net_return"] = policy["net_return"]
+    metrics["strategy_trade_rate"] = policy["trade_rate"]
+    metrics["strategy_win_rate"] = policy["win_rate"]
+    metrics["strategy_signal_accuracy"] = policy["signal_accuracy"]
+    metrics["strategy_avg_trade_return"] = policy["avg_trade_return"]
+    metrics["strategy_profit_factor"] = policy["profit_factor"]
+    metrics["strategy_max_drawdown"] = policy["max_drawdown"]
+    metrics["avg_buy_return"] = policy["avg_buy_return"]
+    metrics["avg_sell_return"] = policy["avg_sell_return"]
+    metrics["avg_abs_future_return"] = float(np.mean(np.abs(future_returns_test))) if len(future_returns_test) else 0.0
+    logger.info(
+        "Signal policy: buy>=%.2f sell<=%.2f conf>=%.2f | net_return=%.4f trade_rate=%.2f win_rate=%.2f",
+        policy["buy_threshold"],
+        policy["sell_threshold"],
+        policy["min_signal_confidence"],
+        policy["net_return"],
+        policy["trade_rate"],
+        policy["win_rate"],
+    )
 
     # Save artifact
     version = model.get_version()
@@ -309,6 +402,179 @@ def _find_optimal_threshold(proba: np.ndarray, y_true: np.ndarray) -> tuple[floa
     return best_thresh, best_acc
 
 
+def _find_utility_threshold(
+    proba: np.ndarray,
+    y_true: np.ndarray,
+    future_returns: np.ndarray,
+) -> tuple[float, float]:
+    """Search for a threshold balancing hit-rate and directional return."""
+    best_score, best_thresh = float("-inf"), 0.5
+    for thresh in np.arange(0.40, 0.62, 0.01):
+        preds = (proba >= thresh).astype(int)
+        acc = float(accuracy_score(y_true, preds))
+        strategy_returns = np.where(preds == 1, future_returns, -future_returns)
+        mean_return = float(np.nanmean(strategy_returns))
+        loss_penalty = float(np.nanmean(np.minimum(strategy_returns, 0.0)))
+        score = acc + (mean_return * 5.0) + loss_penalty
+        if score > best_score:
+            best_score = score
+            best_thresh = float(thresh)
+    return best_thresh, best_score
+
+
+def _estimate_cost_rate(close_prices: np.ndarray, future_returns: np.ndarray) -> np.ndarray:
+    """Estimate round-trip Angel charges as a percentage of entry price."""
+    cost_rates: list[float] = []
+    for price, future_return in zip(close_prices, future_returns, strict=False):
+        if not np.isfinite(price) or price <= 0:
+            cost_rates.append(0.0)
+            continue
+        exit_price = float(price) * (1 + max(abs(float(future_return)), 0.0005))
+        charges = calculate_charges(float(price), max(exit_price, 0.01), 1, TradeType.INTRADAY)
+        cost_rates.append(charges.total_charges / float(price))
+    return np.array(cost_rates, dtype=float)
+
+
+def _policy_metrics(
+    proba: np.ndarray,
+    y_true: np.ndarray,
+    future_returns: np.ndarray,
+    close_prices: np.ndarray,
+    dates: np.ndarray,
+    buy_threshold: float,
+    sell_threshold: float,
+    min_signal_confidence: float,
+) -> dict[str, float]:
+    """Simulate a threshold policy and compute profit-aware trading metrics."""
+    confidence = np.maximum(proba, 1 - proba)
+    actions = np.zeros(len(proba), dtype=int)
+    buy_mask = (proba >= buy_threshold) & (confidence >= min_signal_confidence)
+    sell_mask = (proba <= sell_threshold) & (confidence >= min_signal_confidence)
+    actions[buy_mask] = 1
+    actions[sell_mask] = -1
+
+    gross_returns = np.where(actions == 1, future_returns, np.where(actions == -1, -future_returns, 0.0))
+    cost_rates = np.where(actions != 0, _estimate_cost_rate(close_prices, future_returns), 0.0)
+    net_returns = np.where(actions != 0, gross_returns - cost_rates, 0.0)
+    executed = actions != 0
+    trade_count = int(executed.sum())
+
+    if trade_count == 0:
+        return {
+            "score": float("-inf"),
+            "trade_count": 0,
+            "trade_rate": 0.0,
+            "win_rate": 0.0,
+            "signal_accuracy": 0.0,
+            "gross_return": 0.0,
+            "net_return": 0.0,
+            "avg_trade_return": 0.0,
+            "profit_factor": 0.0,
+            "max_drawdown": 1.0,
+            "avg_buy_return": 0.0,
+            "avg_sell_return": 0.0,
+        }
+
+    signal_accuracy = float(
+        np.mean(
+            np.where(
+                actions[executed] == 1,
+                y_true[executed] == 1,
+                y_true[executed] == 0,
+            )
+        )
+    )
+    win_rate = float(np.mean(net_returns[executed] > 0))
+    avg_trade_return = float(np.mean(net_returns[executed]))
+    daily_frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(dates),
+            "net_return": net_returns,
+            "gross_return": gross_returns,
+        }
+    )
+    daily_net = daily_frame.groupby("date", sort=True)["net_return"].mean().to_numpy()
+    daily_gross = daily_frame.groupby("date", sort=True)["gross_return"].mean().to_numpy()
+    equity_curve = np.cumprod(1 + np.clip(daily_net, -0.95, None))
+    gross_curve = np.cumprod(1 + np.clip(daily_gross, -0.95, None))
+    peak = np.maximum.accumulate(equity_curve)
+    max_drawdown = float(np.max((peak - equity_curve) / np.maximum(peak, 1e-9)))
+    profit_factor_num = float(net_returns[executed & (net_returns > 0)].sum())
+    profit_factor_den = float(-net_returns[executed & (net_returns < 0)].sum())
+    profit_factor = profit_factor_num / profit_factor_den if profit_factor_den > 0 else float(profit_factor_num > 0)
+    avg_buy_return = float(np.mean(net_returns[actions == 1])) if np.any(actions == 1) else 0.0
+    avg_sell_return = float(np.mean(net_returns[actions == -1])) if np.any(actions == -1) else 0.0
+    trade_rate = trade_count / max(len(proba), 1)
+    net_return = float(equity_curve[-1] - 1)
+    gross_return = float(gross_curve[-1] - 1)
+
+    score = (
+        net_return * 6.0
+        + avg_trade_return * 4.0
+        + win_rate * 0.75
+        + signal_accuracy * 0.35
+        - max_drawdown * 3.0
+        + min(trade_rate, 0.35)
+    )
+    min_trades = max(25, int(len(proba) * 0.03))
+    if trade_count < min_trades:
+        score -= 1.0
+
+    return {
+        "score": score,
+        "trade_count": trade_count,
+        "trade_rate": trade_rate,
+        "win_rate": win_rate,
+        "signal_accuracy": signal_accuracy,
+        "gross_return": gross_return,
+        "net_return": net_return,
+        "avg_trade_return": avg_trade_return,
+        "profit_factor": profit_factor,
+        "max_drawdown": max_drawdown,
+        "avg_buy_return": avg_buy_return,
+        "avg_sell_return": avg_sell_return,
+    }
+
+
+def _find_optimal_signal_policy(
+    proba: np.ndarray,
+    y_true: np.ndarray,
+    future_returns: np.ndarray,
+    close_prices: np.ndarray,
+    dates: np.ndarray,
+) -> dict[str, float]:
+    """Search for thresholds that maximize net trading performance."""
+    best = {
+        "buy_threshold": 0.58,
+        "sell_threshold": 0.42,
+        "min_signal_confidence": 0.60,
+        "score": float("-inf"),
+    }
+    for buy_threshold in np.arange(0.54, 0.71, 0.02):
+        for sell_threshold in np.arange(0.30, 0.47, 0.02):
+            if sell_threshold >= buy_threshold:
+                continue
+            for min_confidence in np.arange(0.55, 0.71, 0.05):
+                metrics = _policy_metrics(
+                    proba=proba,
+                    y_true=y_true,
+                    future_returns=future_returns,
+                    close_prices=close_prices,
+                    dates=dates,
+                    buy_threshold=float(buy_threshold),
+                    sell_threshold=float(sell_threshold),
+                    min_signal_confidence=float(min_confidence),
+                )
+                if metrics["score"] > best["score"]:
+                    best = {
+                        "buy_threshold": float(buy_threshold),
+                        "sell_threshold": float(sell_threshold),
+                        "min_signal_confidence": float(min_confidence),
+                        **metrics,
+                    }
+    return best
+
+
 # ---------------------------------------------------------------------------
 # Hybrid GRU + XGBoost pipeline (demo.py strategy)
 # ---------------------------------------------------------------------------
@@ -340,13 +606,10 @@ def train_hybrid(
     refresh_report = ensure_training_data(tickers=tickers, data_dir=data_dir)
 
     logger.info("[hybrid] Building features for %d tickers …", len(tickers))
-    features = build_features(tickers, data_dir=data_dir)
+    features = build_features(tickers, data_dir=data_dir, news_mode="training")
     features = features.copy()
 
-    # Binary labels (same as existing pipeline)
-    features["label"] = _build_labels(features, horizon=horizon)
-    features = features.dropna(subset=["label"]).reset_index(drop=True)
-    features["label"] = features["label"].astype(int)
+    features = _prepare_training_frame(features, horizon=horizon)
 
     class_dist = features["label"].value_counts().sort_index()
     logger.info("[hybrid] Labels: down=%d, up=%d", class_dist.get(0, 0), class_dist.get(1, 0))
@@ -500,15 +763,8 @@ def train_ensemble(
     refresh_report = ensure_training_data(tickers=tickers, data_dir=data_dir)
 
     logger.info("Building features for %d tickers …", len(tickers))
-    features = build_features(tickers, data_dir=data_dir)
-    features = features.copy()
-    features["label"] = _build_labels(features, horizon=horizon)
-    features = features.dropna(subset=["label"]).reset_index(drop=True)
-    features["label"] = features["label"].astype(int)
-
-    # Normalize features per-ticker
-    features = _normalize_features_per_ticker(features, NUMERIC_FEATURES)
-    features = features.dropna(subset=NUMERIC_FEATURES).reset_index(drop=True)
+    features = build_features(tickers, data_dir=data_dir, news_mode="training")
+    features = _prepare_training_frame(features, horizon=horizon)
 
     train_df, val_df, test_df = _walk_forward_split(features)
 

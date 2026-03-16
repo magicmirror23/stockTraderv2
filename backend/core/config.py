@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     TRAINING_DATA_LOOKBACK_DAYS: int = 730
     TRAINING_DATA_MAX_AGE_DAYS: int = 3
     TRAINING_TICKERS_FILE: str = str(PROJECT_ROOT / "scripts" / "sample_data" / "tickers.txt")
+    ENABLE_MARKET_CONTEXT_FEATURES: bool = True
+    MARKET_CONTEXT_SYMBOLS: str = "NIFTY50,INDIAVIX,USDINR,BRENT,GOLD,SP500,US10Y"
+    ENABLE_NEWS_FEATURES: bool = True
+    NEWS_CONTEXT_LOOKBACK_DAYS: int = 365
+    NEWS_FEATURE_WINDOW_DAYS: int = 30
+    NEWS_DATA_MAX_AGE_HOURS: int = 12
 
     @field_validator("API_V1_PREFIX")
     @classmethod
@@ -141,6 +147,14 @@ class Settings(BaseSettings):
         return self.storage_path / "raw"
 
     @property
+    def context_data_path(self) -> Path:
+        return self.storage_path / "context"
+
+    @property
+    def news_data_path(self) -> Path:
+        return self.storage_path / "news"
+
+    @property
     def model_artifacts_path(self) -> Path:
         return self.model_registry_path.parent / "artifacts"
 
@@ -157,6 +171,10 @@ class Settings(BaseSettings):
     @property
     def training_tickers_file(self) -> Path:
         return Path(self.TRAINING_TICKERS_FILE)
+
+    @property
+    def market_context_symbols(self) -> list[str]:
+        return [symbol.strip().upper() for symbol in self.MARKET_CONTEXT_SYMBOLS.split(",") if symbol.strip()]
 
     @property
     def persistence_enabled(self) -> bool:
@@ -181,6 +199,8 @@ class Settings(BaseSettings):
     def ensure_runtime_directories(self) -> None:
         self.storage_path.mkdir(parents=True, exist_ok=True)
         self.raw_data_path.mkdir(parents=True, exist_ok=True)
+        self.context_data_path.mkdir(parents=True, exist_ok=True)
+        self.news_data_path.mkdir(parents=True, exist_ok=True)
         self.model_registry_path.parent.mkdir(parents=True, exist_ok=True)
         self.model_artifacts_path.mkdir(parents=True, exist_ok=True)
 

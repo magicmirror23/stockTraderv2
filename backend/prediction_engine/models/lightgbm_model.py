@@ -40,22 +40,33 @@ class LightGBMModel(BaseModel):
         return {
             "objective": "binary",
             "metric": "binary_logloss",
-            "learning_rate": 0.01,
-            "num_leaves": 31,
-            "max_depth": 5,
-            "min_child_samples": 80,
-            "feature_fraction": 0.7,
-            "feature_fraction_bynode": 0.5,
-            "bagging_fraction": 0.7,
-            "bagging_freq": 5,
-            "lambda_l1": 0.3,
-            "lambda_l2": 1.5,
-            "min_gain_to_split": 0.02,
-            "path_smooth": 5,
-            "max_bin": 255,
+            "learning_rate": 0.02,
+            "num_leaves": 63,
+            "max_depth": 6,
+            "min_child_samples": 45,
+            "feature_fraction": 0.85,
+            "feature_fraction_bynode": 0.75,
+            "bagging_fraction": 0.8,
+            "bagging_freq": 3,
+            "lambda_l1": 0.1,
+            "lambda_l2": 2.0,
+            "min_gain_to_split": 0.0,
+            "path_smooth": 2,
+            "max_bin": 511,
             "is_unbalance": True,
             "seed": self._seed,
             "verbose": -1,
+        }
+
+    def _signal_policy(self) -> dict[str, float]:
+        metrics = self._metrics or {}
+        return {
+            "buy_threshold": float(metrics.get("buy_threshold", max(metrics.get("optimal_threshold", 0.58), 0.55))),
+            "sell_threshold": float(metrics.get("sell_threshold", min(1 - metrics.get("optimal_threshold", 0.58), 0.45))),
+            "min_signal_confidence": float(metrics.get("min_signal_confidence", 0.60)),
+            "avg_abs_future_return": float(metrics.get("avg_abs_future_return", 0.012)),
+            "avg_buy_return": float(metrics.get("avg_buy_return", metrics.get("avg_abs_future_return", 0.012))),
+            "avg_sell_return": float(metrics.get("avg_sell_return", -metrics.get("avg_abs_future_return", 0.012))),
         }
 
     # ------------------------------------------------------------------
@@ -123,17 +134,17 @@ class LightGBMModel(BaseModel):
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Return 3-class labels: 0=sell, 1=hold, 2=buy.
 
-        Binary model predicts P(up). Map to 3 classes using confidence:
-        - P(up) > 0.55 → buy (2)
-        - P(up) < 0.45 → sell (0)
-        - otherwise → hold (1)
+        Binary model predicts P(up). Map to 3 classes using the learned
+        threshold policy from training when available.
         """
         proba_up = self.predict_proba(X)
         if proba_up.ndim == 2:
             proba_up = proba_up[:, 1] if proba_up.shape[1] == 2 else proba_up[:, 0]
+        policy = self._signal_policy()
+        confidence = np.maximum(proba_up, 1 - proba_up)
         labels = np.ones(len(proba_up), dtype=int)  # default hold
-        labels[proba_up > 0.55] = 2   # buy
-        labels[proba_up < 0.45] = 0   # sell
+        labels[(proba_up >= policy["buy_threshold"]) & (confidence >= policy["min_signal_confidence"])] = 2
+        labels[(proba_up <= policy["sell_threshold"]) & (confidence >= policy["min_signal_confidence"])] = 0
         return labels
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
@@ -155,14 +166,18 @@ class LightGBMModel(BaseModel):
         proba_up = self.predict_proba(X)
         if proba_up.ndim == 2:
             proba_up = proba_up[:, 1] if proba_up.shape[1] == 2 else proba_up[:, 0]
+        policy = self._signal_policy()
         n = len(proba_up)
         result = np.zeros((n, 3))
         for i, p_up in enumerate(proba_up):
             p_down = 1 - p_up
-            if p_up > 0.55:
-                result[i] = [0.1, 0.2, 0.7 * (p_up / 0.55)]  # buy-leaning
-            elif p_up < 0.45:
-                result[i] = [0.7 * (p_down / 0.55), 0.2, 0.1]  # sell-leaning
+            confidence = max(p_up, p_down)
+            if p_up >= policy["buy_threshold"] and confidence >= policy["min_signal_confidence"]:
+                buy_strength = max((p_up - policy["buy_threshold"]) / max(1 - policy["buy_threshold"], 1e-6), 0.0)
+                result[i] = [0.08, 0.18, 0.74 + buy_strength * 0.2]
+            elif p_up <= policy["sell_threshold"] and confidence >= policy["min_signal_confidence"]:
+                sell_strength = max((policy["sell_threshold"] - p_up) / max(policy["sell_threshold"], 1e-6), 0.0)
+                result[i] = [0.74 + sell_strength * 0.2, 0.18, 0.08]
             else:
                 result[i] = [0.2, 0.6, 0.2]  # hold
             result[i] /= result[i].sum()  # normalize
@@ -182,28 +197,38 @@ class LightGBMModel(BaseModel):
         proba_up = self.predict_proba(X)
         if proba_up.ndim == 2:
             proba_up = proba_up[:, 1] if proba_up.shape[1] == 2 else proba_up[:, 0]
+        policy = self._signal_policy()
         results = []
         for p_up in proba_up:
             p_down = 1 - p_up
+            confidence = float(max(p_up, p_down))
+            signal_edge = float(abs(p_up - 0.5) * 2)
 
-            # Cost-aware thresholds
-            buy_threshold = 0.55
-            sell_threshold = 0.45
+            buy_threshold = policy["buy_threshold"]
+            sell_threshold = policy["sell_threshold"]
+            min_signal_confidence = policy["min_signal_confidence"]
             if price is not None and quantity > 0:
                 breakeven = estimate_breakeven_move(price, quantity, TradeType.INTRADAY)
                 breakeven_pct = breakeven / price if price > 0 else 0
-                buy_threshold = min(0.70, 0.55 + breakeven_pct * 3)
-                sell_threshold = max(0.30, 0.45 - breakeven_pct * 3)
+                buy_threshold = min(0.78, buy_threshold + breakeven_pct * 4)
+                sell_threshold = max(0.22, sell_threshold - breakeven_pct * 4)
+                min_signal_confidence = min(0.92, max(min_signal_confidence, 0.5 + breakeven_pct * 5))
 
-            if p_up > buy_threshold:
+            if confidence < min_signal_confidence:
+                action = "hold"
+            elif p_up >= buy_threshold:
                 action = "buy"
-            elif p_up < sell_threshold:
+            elif p_up <= sell_threshold:
                 action = "sell"
             else:
                 action = "hold"
 
-            confidence = float(max(p_up, p_down))
-            expected_return = float(p_up - 0.5) * 0.10  # scaled direction signal
+            if action == "buy":
+                expected_return = max(policy["avg_buy_return"], policy["avg_abs_future_return"]) * signal_edge
+            elif action == "sell":
+                expected_return = min(policy["avg_sell_return"], -policy["avg_abs_future_return"]) * signal_edge
+            else:
+                expected_return = 0.0
 
             net_expected_return = expected_return
             if price is not None and quantity > 0:
@@ -215,6 +240,11 @@ class LightGBMModel(BaseModel):
                 "confidence": round(confidence, 4),
                 "expected_return": round(expected_return, 6),
                 "net_expected_return": round(net_expected_return, 6),
+                "signal_policy": {
+                    "buy_threshold": round(buy_threshold, 4),
+                    "sell_threshold": round(sell_threshold, 4),
+                    "min_signal_confidence": round(min_signal_confidence, 4),
+                },
             })
         return results
 

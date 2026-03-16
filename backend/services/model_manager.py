@@ -131,12 +131,17 @@ class ModelManager:
             feat_dict = get_features_for_inference(ticker)
             numeric_cols = [c for c in FEATURE_COLUMNS if c not in ("ticker", "date")]
             X = pd.DataFrame([{c: feat_dict[c] for c in numeric_cols}])
-            results = self._model.predict_with_expected_return(X)
+            results = self._model.predict_with_expected_return(
+                X,
+                price=float(feat_dict.get("close", 0.0) or 0.0),
+                quantity=1,
+            )
             r = results[0]
             return {
                 "action": r["action"],
                 "confidence": r["confidence"],
                 "expected_return": r["expected_return"],
+                "net_expected_return": r.get("net_expected_return", r["expected_return"]),
                 "model_version": self._model_version,
                 "calibration_score": r.get("calibration_score"),
                 "fallback": False,

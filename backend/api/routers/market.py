@@ -452,7 +452,7 @@ class TradingBot:
                 if action == "hold" or confidence < self.min_confidence:
                     continue
 
-                price = prediction.get("predicted_price", 100)
+                price = prediction.get("close", prediction.get("predicted_price", 100))
                 if price <= 0:
                     continue
 
@@ -468,7 +468,8 @@ class TradingBot:
 
                 # Check if trade is worth it after charges
                 breakeven_move = estimate_breakeven_move(price, qty, TradeType.INTRADAY)
-                expected_profit = price * prediction.get("expected_return", 0.02)
+                signal_return = abs(prediction.get("net_expected_return", prediction.get("expected_return", 0.0)))
+                expected_profit = price * signal_return
                 if expected_profit < breakeven_move:
                     logger.debug("Skipping %s: expected profit ₹%.2f < breakeven ₹%.2f",
                                  ticker, expected_profit, breakeven_move)

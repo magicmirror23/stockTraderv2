@@ -13,6 +13,7 @@ import pandas as pd
 
 from backend.core.config import settings
 from backend.prediction_engine.data_pipeline.connector_yahoo import YahooConnector
+from backend.services.news_context import get_news_context_manager
 
 
 logger = logging.getLogger(__name__)
@@ -27,9 +28,21 @@ class TrainingDataRefreshReport:
     reused: list[str]
     deleted: list[str]
     failed: dict[str, str]
+    context_symbols: list[str]
+    context_downloaded: list[str]
+    context_refreshed: list[str]
+    context_reused: list[str]
+    context_failed: dict[str, str]
+    news_topics: list[str]
+    news_downloaded: list[str]
+    news_refreshed: list[str]
+    news_reused: list[str]
+    news_failed: dict[str, str]
     start_date: str
     end_date: str
     data_dir: str
+    context_dir: str | None
+    news_dir: str | None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -58,6 +71,10 @@ def ensure_training_data(
     resolved_tickers = load_training_tickers(tickers)
     output_dir = Path(data_dir) if data_dir is not None else settings.raw_data_path
     output_dir.mkdir(parents=True, exist_ok=True)
+    context_symbols = settings.market_context_symbols if settings.ENABLE_MARKET_CONTEXT_FEATURES else []
+    context_dir = settings.context_data_path
+    if context_symbols:
+        context_dir.mkdir(parents=True, exist_ok=True)
 
     lookback = lookback_days if lookback_days is not None else settings.TRAINING_DATA_LOOKBACK_DAYS
     max_age = max_age_days if max_age_days is not None else settings.TRAINING_DATA_MAX_AGE_DAYS
@@ -73,13 +90,26 @@ def ensure_training_data(
         reused=[],
         deleted=[],
         failed={},
+        context_symbols=context_symbols,
+        context_downloaded=[],
+        context_refreshed=[],
+        context_reused=[],
+        context_failed={},
+        news_topics=[],
+        news_downloaded=[],
+        news_refreshed=[],
+        news_reused=[],
+        news_failed={},
         start_date=start_dt.date().isoformat(),
         end_date=end_dt.date().isoformat(),
         data_dir=str(output_dir),
+        context_dir=str(context_dir) if context_symbols else None,
+        news_dir=str(settings.news_data_path / "topics") if settings.ENABLE_NEWS_FEATURES else None,
     )
 
     valid_names = {f"{ticker}.csv" for ticker in resolved_tickers}
-    total = len(resolved_tickers)
+    context_valid_names = {f"{symbol}.csv" for symbol in context_symbols}
+    total = len(resolved_tickers) + len(context_symbols)
     if progress_callback and total > 0:
         progress_callback(0, total, "Checking training CSV cache")
     for stale_path in output_dir.glob("*.csv"):
@@ -88,8 +118,17 @@ def ensure_training_data(
             report.deleted.append(stale_path.stem.upper())
             logger.info("Deleted stale training CSV not in ticker list: %s", stale_path.name)
 
-    for index, ticker in enumerate(resolved_tickers, start=1):
-        path = output_dir / f"{ticker}.csv"
+    if context_symbols:
+        for stale_path in context_dir.glob("*.csv"):
+            if stale_path.name not in context_valid_names:
+                stale_path.unlink(missing_ok=True)
+                logger.info("Deleted stale market context CSV not in context list: %s", stale_path.name)
+
+    jobs = [(ticker, output_dir, "ticker") for ticker in resolved_tickers]
+    jobs.extend((symbol, context_dir, "context") for symbol in context_symbols)
+
+    for index, (symbol, symbol_dir, category) in enumerate(jobs, start=1):
+        path = symbol_dir / f"{symbol}.csv"
         needs_refresh = not path.exists()
         reason = "missing"
 
@@ -99,16 +138,18 @@ def ensure_training_data(
             reason = freshness_reason
 
         if not needs_refresh:
-            report.reused.append(ticker)
+            _append_report_status(report, category, "reused", symbol)
+            if progress_callback:
+                progress_callback(index, total, f"Reused {category} data for {symbol}")
             continue
 
         try:
             refreshed = _download_to_temp(
                 connector=connector,
-                ticker=ticker,
+                ticker=symbol,
                 start_dt=start_dt,
                 end_dt=end_dt,
-                output_dir=output_dir,
+                output_dir=symbol_dir,
             )
             if path.exists():
                 backup_path = path.with_suffix(".csv.bak")
@@ -117,7 +158,8 @@ def ensure_training_data(
                     path.unlink(missing_ok=True)
                     refreshed.replace(path)
                     backup_path.unlink(missing_ok=True)
-                    report.deleted.append(ticker)
+                    if category == "ticker":
+                        report.deleted.append(symbol)
                 except Exception:
                     if not path.exists() and backup_path.exists():
                         backup_path.replace(path)
@@ -126,23 +168,61 @@ def ensure_training_data(
             else:
                 refreshed.replace(path)
             if reason == "missing":
-                report.downloaded.append(ticker)
+                _append_report_status(report, category, "downloaded", symbol)
             else:
-                report.refreshed.append(ticker)
-            logger.info("Fetched fresh training CSV for %s", ticker)
+                _append_report_status(report, category, "refreshed", symbol)
+            if category == "context":
+                logger.info("Fetched fresh market context CSV for %s", symbol)
+            else:
+                logger.info("Fetched fresh training CSV for %s", symbol)
         except Exception as exc:
-            report.failed[ticker] = str(exc)
-            logger.warning("Failed to refresh training CSV for %s: %s", ticker, exc)
+            _append_report_error(report, category, symbol, exc)
+            if category == "context":
+                logger.warning("Failed to refresh market context CSV for %s: %s", symbol, exc)
+            else:
+                logger.warning("Failed to refresh training CSV for %s: %s", symbol, exc)
             if path.exists():
-                report.reused.append(ticker)
+                _append_report_status(report, category, "reused", symbol)
         finally:
             if progress_callback:
-                progress_callback(index, total, f"Processed training data for {ticker}")
+                progress_callback(index, total, f"Processed {category} data for {symbol}")
 
     if report.failed and len(report.failed) == len(resolved_tickers):
         raise RuntimeError("Unable to refresh any training CSV files")
 
+    if settings.ENABLE_NEWS_FEATURES:
+        try:
+            news_report = get_news_context_manager().ensure_recent(force=True)
+            if news_report is not None:
+                report.news_topics = news_report.topics
+                report.news_downloaded = news_report.downloaded
+                report.news_refreshed = news_report.refreshed
+                report.news_reused = news_report.reused
+                report.news_failed = news_report.failed
+        except Exception as exc:
+            report.news_failed["__global__"] = str(exc)
+            logger.warning("Failed to refresh news context: %s", exc)
+
     return report
+
+
+def _append_report_status(report: TrainingDataRefreshReport, category: str, status: str, symbol: str) -> None:
+    if category == "context":
+        getattr(report, f"context_{status}").append(symbol)
+    else:
+        getattr(report, status).append(symbol)
+
+
+def _append_report_error(
+    report: TrainingDataRefreshReport,
+    category: str,
+    symbol: str,
+    error: Exception,
+) -> None:
+    if category == "context":
+        report.context_failed[symbol] = str(error)
+    else:
+        report.failed[symbol] = str(error)
 
 
 def _download_to_temp(

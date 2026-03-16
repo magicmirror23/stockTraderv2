@@ -11,15 +11,27 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 
+from backend.core.config import settings
+from backend.prediction_engine.data_pipeline.connector_news import topic_feature_columns, topic_queries
 from backend.prediction_engine.feature_store import transforms as T
 
 logger = logging.getLogger(__name__)
 
 MANIFEST_PATH = Path(__file__).parent / "manifest.json"
+NEWS_FEATURE_COLUMNS: list[str] = topic_feature_columns()
+NEWS_AGGREGATE_FEATURE_COLUMNS: list[str] = [
+    "news_domestic_sentiment_30d",
+    "news_global_sentiment_30d",
+    "news_sentiment_momentum_30d",
+    "news_attention_30d",
+    "news_geopolitical_risk_30d",
+]
+ALL_NEWS_FEATURE_COLUMNS: list[str] = NEWS_FEATURE_COLUMNS + NEWS_AGGREGATE_FEATURE_COLUMNS
 
 # Ordered list of feature columns produced by build_features.
 FEATURE_COLUMNS: list[str] = [
@@ -76,7 +88,91 @@ FEATURE_COLUMNS: list[str] = [
     "return_lag_1",
     "return_lag_5",
     "day_of_week",
+    # Market, macro, and regime context
+    "market_return_1d",
+    "market_return_5d",
+    "market_trend_20",
+    "market_volatility_20",
+    "india_vix_close",
+    "india_vix_return_5d",
+    "usd_inr_return_5d",
+    "brent_return_5d",
+    "gold_return_5d",
+    "sp500_return_1d",
+    "us10y_change_5d",
+    "macro_stress_score",
+    "breadth_up_ratio",
+    "breadth_above_sma50",
+    "market_median_return_1d",
+    "market_dispersion_5d",
+    "excess_return_1d",
+    "excess_return_5d",
+    "rolling_beta_20",
+    "rolling_corr_20",
+    # News and event context
+    *topic_feature_columns(),
+    *NEWS_AGGREGATE_FEATURE_COLUMNS,
 ]
+
+CONTEXT_FEATURE_COLUMNS: list[str] = [
+    "market_return_1d",
+    "market_return_5d",
+    "market_trend_20",
+    "market_volatility_20",
+    "india_vix_close",
+    "india_vix_return_5d",
+    "usd_inr_return_5d",
+    "brent_return_5d",
+    "gold_return_5d",
+    "sp500_return_1d",
+    "us10y_change_5d",
+]
+
+BREADTH_FEATURE_COLUMNS: list[str] = [
+    "breadth_up_ratio",
+    "breadth_above_sma50",
+    "market_median_return_1d",
+    "market_dispersion_5d",
+]
+
+RELATIVE_FEATURE_COLUMNS: list[str] = [
+    "macro_stress_score",
+    "excess_return_1d",
+    "excess_return_5d",
+    "rolling_beta_20",
+    "rolling_corr_20",
+]
+
+
+def _derive_news_aggregate_features(news: pd.DataFrame) -> pd.DataFrame:
+    domestic_sentiment = [
+        "india_market_sentiment_30d",
+        "india_economy_sentiment_30d",
+        "capital_flows_sentiment_30d",
+    ]
+    global_sentiment = [
+        "central_banks_sentiment_30d",
+        "geopolitics_sentiment_30d",
+    ]
+    momentum_columns = [f"{topic}_sentiment_7d" for topic in topic_queries()]
+    baseline_columns = [f"{topic}_sentiment_30d" for topic in topic_queries()]
+    count_columns = [f"{topic}_headline_count_30d" for topic in topic_queries()]
+
+    news["news_domestic_sentiment_30d"] = news[domestic_sentiment].mean(axis=1)
+    news["news_global_sentiment_30d"] = news[global_sentiment].mean(axis=1)
+    news["news_sentiment_momentum_30d"] = (
+        news[momentum_columns].mean(axis=1) - news[baseline_columns].mean(axis=1)
+    )
+    news["news_attention_30d"] = news[count_columns].sum(axis=1)
+    news["news_geopolitical_risk_30d"] = (
+        (-news["geopolitics_sentiment_30d"]).clip(lower=0.0)
+        + (-news["central_banks_sentiment_30d"]).clip(lower=0.0)
+    ) / 2.0
+    news[NEWS_AGGREGATE_FEATURE_COLUMNS] = news[NEWS_AGGREGATE_FEATURE_COLUMNS].replace(
+        [np.inf, -np.inf],
+        np.nan,
+    ).fillna(0.0)
+    return news
 
 
 def _load_ticker_csv(ticker: str, data_dir: Path) -> pd.DataFrame:
@@ -168,11 +264,217 @@ def _compute_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return feat
 
 
+def _load_context_features(context_dir: Path) -> pd.DataFrame:
+    """Build market and macro context features from external Yahoo datasets."""
+    if not settings.ENABLE_MARKET_CONTEXT_FEATURES:
+        return pd.DataFrame(columns=["date"] + CONTEXT_FEATURE_COLUMNS)
+
+    frames: list[pd.DataFrame] = []
+    for symbol in settings.market_context_symbols:
+        path = context_dir / f"{symbol}.csv"
+        if not path.exists():
+            logger.warning("Missing market context CSV for %s in %s", symbol, context_dir)
+            continue
+
+        df = pd.read_csv(path, parse_dates=["Date"]).sort_values("Date").reset_index(drop=True)
+        if df.empty:
+            logger.warning("Market context CSV for %s is empty", symbol)
+            continue
+
+        close = df["Close"]
+        frame = pd.DataFrame({"date": df["Date"].values})
+
+        if symbol == "NIFTY50":
+            frame["market_return_1d"] = T.returns(close, 1).values
+            frame["market_return_5d"] = T.returns(close, 5).values
+            frame["market_trend_20"] = T.price_distance_from_sma(close, 20).values
+            frame["market_volatility_20"] = T.volatility(close, 20).values
+        elif symbol == "INDIAVIX":
+            frame["india_vix_close"] = close.values
+            frame["india_vix_return_5d"] = T.returns(close, 5).values
+        elif symbol == "USDINR":
+            frame["usd_inr_return_5d"] = T.returns(close, 5).values
+        elif symbol == "BRENT":
+            frame["brent_return_5d"] = T.returns(close, 5).values
+        elif symbol == "GOLD":
+            frame["gold_return_5d"] = T.returns(close, 5).values
+        elif symbol == "SP500":
+            frame["sp500_return_1d"] = T.returns(close, 1).values
+        elif symbol == "US10Y":
+            frame["us10y_change_5d"] = close.diff(5).values
+        else:
+            continue
+
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(columns=["date"] + CONTEXT_FEATURE_COLUMNS)
+
+    context = frames[0]
+    for frame in frames[1:]:
+        context = context.merge(frame, on="date", how="outer")
+
+    context = context.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+    for column in CONTEXT_FEATURE_COLUMNS:
+        if column not in context.columns:
+            context[column] = np.nan
+    return context[["date"] + CONTEXT_FEATURE_COLUMNS]
+
+
+def _merge_context_features(features: pd.DataFrame, context_dir: Path) -> pd.DataFrame:
+    context = _load_context_features(context_dir)
+    if context.empty:
+        for column in CONTEXT_FEATURE_COLUMNS:
+            if column not in features.columns:
+                features[column] = 0.0
+        return features
+
+    merged = pd.merge_asof(
+        features.sort_values("date"),
+        context.sort_values("date"),
+        on="date",
+        direction="backward",
+    )
+    merged = merged.sort_values(["ticker", "date"]).reset_index(drop=True)
+    merged[CONTEXT_FEATURE_COLUMNS] = merged[CONTEXT_FEATURE_COLUMNS].fillna(0.0)
+    return merged
+
+
+def _load_news_features(
+    news_dir: Path,
+    news_mode: Literal["training", "inference"] = "training",
+) -> pd.DataFrame:
+    """Load topic-level rolling news sentiment features."""
+    if not settings.ENABLE_NEWS_FEATURES:
+        return pd.DataFrame(columns=["date"] + ALL_NEWS_FEATURE_COLUMNS)
+
+    frames: list[pd.DataFrame] = []
+    for topic in topic_queries():
+        path = news_dir / f"{topic}.csv"
+        if not path.exists():
+            logger.warning("Missing news topic CSV for %s in %s", topic, news_dir)
+            continue
+
+        frame = pd.read_csv(path, parse_dates=["date"]).sort_values("date").reset_index(drop=True)
+        if frame.empty:
+            continue
+
+        renamed = frame.rename(
+            columns={
+                "sentiment_7d": f"{topic}_sentiment_7d",
+                "sentiment_30d": f"{topic}_sentiment_30d",
+                "headline_count_7d": f"{topic}_headline_count_7d",
+                "headline_count_30d": f"{topic}_headline_count_30d",
+            }
+        )
+        keep_columns = [
+            "date",
+            f"{topic}_sentiment_7d",
+            f"{topic}_sentiment_30d",
+            f"{topic}_headline_count_7d",
+            f"{topic}_headline_count_30d",
+        ]
+        frames.append(renamed[keep_columns])
+
+    if not frames:
+        return pd.DataFrame(columns=["date"] + ALL_NEWS_FEATURE_COLUMNS)
+
+    news = frames[0]
+    for frame in frames[1:]:
+        news = news.merge(frame, on="date", how="outer")
+    news = news.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+    for column in NEWS_FEATURE_COLUMNS:
+        if column not in news.columns:
+            news[column] = 0.0
+    news[NEWS_FEATURE_COLUMNS] = news[NEWS_FEATURE_COLUMNS].replace([np.inf, -np.inf], np.nan).ffill()
+    if news_mode == "training":
+        news[NEWS_FEATURE_COLUMNS] = news[NEWS_FEATURE_COLUMNS].shift(1)
+    news[NEWS_FEATURE_COLUMNS] = news[NEWS_FEATURE_COLUMNS].fillna(0.0)
+    news = _derive_news_aggregate_features(news)
+    return news[["date"] + ALL_NEWS_FEATURE_COLUMNS]
+
+
+def _merge_news_features(
+    features: pd.DataFrame,
+    news_dir: Path,
+    news_mode: Literal["training", "inference"] = "training",
+) -> pd.DataFrame:
+    news = _load_news_features(news_dir, news_mode=news_mode)
+    if news.empty:
+        for column in ALL_NEWS_FEATURE_COLUMNS:
+            if column not in features.columns:
+                features[column] = 0.0
+        return features
+
+    merged = pd.merge_asof(
+        features.sort_values("date"),
+        news.sort_values("date"),
+        on="date",
+        direction="backward",
+    )
+    merged = merged.sort_values(["ticker", "date"]).reset_index(drop=True)
+    merged[ALL_NEWS_FEATURE_COLUMNS] = merged[ALL_NEWS_FEATURE_COLUMNS].fillna(0.0)
+    return merged
+
+
+def _latest_news_snapshot(news_dir: Path) -> dict[str, float]:
+    news = _load_news_features(news_dir, news_mode="inference")
+    if news.empty:
+        return {column: 0.0 for column in ALL_NEWS_FEATURE_COLUMNS}
+    row = news.iloc[-1]
+    return {
+        column: float(row[column]) if pd.notna(row[column]) else 0.0
+        for column in ALL_NEWS_FEATURE_COLUMNS
+    }
+
+
+def _add_breadth_and_relative_features(features: pd.DataFrame) -> pd.DataFrame:
+    features = features.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+    features["breadth_up_ratio"] = features.groupby("date")["return_1d"].transform(
+        lambda values: float((values > 0).mean())
+    )
+    features["breadth_above_sma50"] = features.groupby("date")["distance_sma50"].transform(
+        lambda values: float((values > 0).mean())
+    )
+    features["market_median_return_1d"] = features.groupby("date")["return_1d"].transform("median")
+    features["market_dispersion_5d"] = features.groupby("date")["return_5d"].transform("std").fillna(0.0)
+
+    features["excess_return_1d"] = features["return_1d"] - features["market_return_1d"]
+    features["excess_return_5d"] = features["return_5d"] - features["market_return_5d"]
+    features["macro_stress_score"] = (
+        features["india_vix_return_5d"].fillna(0.0) * 2.0
+        + features["usd_inr_return_5d"].fillna(0.0) * 1.5
+        + features["brent_return_5d"].fillna(0.0)
+        + features["gold_return_5d"].fillna(0.0) * 0.5
+        - features["market_return_5d"].fillna(0.0) * 1.5
+        - features["sp500_return_1d"].fillna(0.0) * 0.5
+    )
+
+    beta_values = pd.Series(index=features.index, dtype=float)
+    corr_values = pd.Series(index=features.index, dtype=float)
+    for _, group in features.groupby("ticker", sort=False):
+        market = group["market_return_1d"].fillna(0.0)
+        stock = group["return_1d"].fillna(0.0)
+        beta_values.loc[group.index] = T.rolling_beta(stock, market, window=20, min_periods=10).values
+        corr_values.loc[group.index] = T.rolling_correlation(stock, market, window=20, min_periods=10).values
+
+    features["rolling_beta_20"] = beta_values
+    features["rolling_corr_20"] = corr_values
+
+    fill_columns = CONTEXT_FEATURE_COLUMNS + BREADTH_FEATURE_COLUMNS + RELATIVE_FEATURE_COLUMNS
+    features[fill_columns] = features[fill_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return features
+
+
 def build_features(
     tickers: list[str],
     start: str | datetime | None = None,
     end: str | datetime | None = None,
     data_dir: str | Path = "storage/raw",
+    context_dir: str | Path | None = None,
+    news_dir: str | Path | None = None,
+    news_mode: Literal["training", "inference"] = "training",
 ) -> pd.DataFrame:
     """Build the full feature matrix for a list of tickers.
 
@@ -191,6 +493,8 @@ def build_features(
         Concatenated features with columns matching ``FEATURE_COLUMNS``.
     """
     data_dir = Path(data_dir)
+    resolved_context_dir = Path(context_dir) if context_dir is not None else settings.context_data_path
+    resolved_news_dir = Path(news_dir) if news_dir is not None else settings.news_data_path / "topics"
     frames: list[pd.DataFrame] = []
 
     for ticker in tickers:
@@ -200,12 +504,16 @@ def build_features(
             logger.warning("Skipping %s – CSV not found in %s", ticker, data_dir)
             continue
         feat = _compute_features(df, ticker)
-        frames.append(feat)
+        if not feat.empty:
+            frames.append(feat)
 
     if not frames:
         raise FileNotFoundError("No CSV data files found for any ticker")
 
     result = pd.concat(frames, ignore_index=True)
+    result = _merge_context_features(result, resolved_context_dir)
+    result = _merge_news_features(result, resolved_news_dir, news_mode=news_mode)
+    result = _add_breadth_and_relative_features(result)
 
     # Date filtering
     if start is not None:
@@ -226,6 +534,8 @@ def get_features_for_inference(
     ticker: str,
     timestamp: str | datetime | None = None,
     data_dir: str | Path = "storage/raw",
+    context_dir: str | Path | None = None,
+    news_dir: str | Path | None = None,
 ) -> dict:
     """Return the latest feature vector for a single ticker.
 
@@ -243,10 +553,33 @@ def get_features_for_inference(
     dict
         Feature dictionary matching the model input schema.
     """
-    data_dir = Path(data_dir)
-    df = _load_ticker_csv(ticker, data_dir)
-    feat = _compute_features(df, ticker).dropna().reset_index(drop=True)
+    from backend.services.news_context import get_news_context_manager
+    from backend.services.training_data import load_training_tickers
 
+    ticker = ticker.upper()
+    try:
+        universe = load_training_tickers()
+    except Exception:
+        universe = [ticker]
+
+    if ticker not in universe:
+        universe.append(ticker)
+
+    if settings.ENABLE_NEWS_FEATURES:
+        try:
+            get_news_context_manager().ensure_recent(force=False)
+        except Exception as exc:
+            logger.warning("News context refresh skipped during inference: %s", exc)
+
+    resolved_news_dir = Path(news_dir) if news_dir is not None else settings.news_data_path / "topics"
+    feat = build_features(
+        universe,
+        data_dir=data_dir,
+        context_dir=context_dir,
+        news_dir=resolved_news_dir,
+        news_mode="inference",
+    )
+    feat = feat[feat["ticker"] == ticker].reset_index(drop=True)
     if feat.empty:
         raise ValueError(f"No valid feature rows for {ticker}")
 
@@ -256,7 +589,9 @@ def get_features_for_inference(
         if feat.empty:
             raise ValueError(f"No feature rows for {ticker} on or before {timestamp}")
 
-    row = feat.iloc[-1]
+    row = feat.iloc[-1].copy()
+    for column, value in _latest_news_snapshot(resolved_news_dir).items():
+        row[column] = value
     return {col: row[col] for col in FEATURE_COLUMNS}
 
 

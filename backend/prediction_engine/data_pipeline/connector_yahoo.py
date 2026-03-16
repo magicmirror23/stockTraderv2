@@ -25,15 +25,30 @@ class YahooConnector:
     """Fetches OHLCV data from Yahoo Finance."""
 
     REQUIRED_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+    SYMBOL_ALIASES = {
+        "BAJAJ_AUTO": ["BAJAJ-AUTO.NS"],
+        "M_M": ["M&M.NS"],
+        "NIFTY50": ["^NSEI"],
+        "BANKNIFTY": ["^NSEBANK"],
+        "INDIAVIX": ["^INDIAVIX"],
+        "USDINR": ["INR=X"],
+        "BRENT": ["BZ=F"],
+        "GOLD": ["GC=F"],
+        "SP500": ["^GSPC"],
+        "US10Y": ["^TNX"],
+    }
 
     def __init__(self, nse_suffix: str = ".NS") -> None:
         self._suffix = nse_suffix
 
-    def _yahoo_ticker(self, ticker: str) -> str:
-        """Append exchange suffix if not already present."""
-        if not ticker.endswith(self._suffix):
-            return f"{ticker}{self._suffix}"
-        return ticker
+    def _yahoo_tickers(self, ticker: str) -> list[str]:
+        """Return candidate Yahoo symbols for a logical ticker."""
+        normalized = ticker.strip().upper()
+        if normalized in self.SYMBOL_ALIASES:
+            return self.SYMBOL_ALIASES[normalized]
+        if normalized.startswith("^") or "=" in normalized or normalized.endswith(self._suffix):
+            return [normalized]
+        return [f"{normalized}{self._suffix}"]
 
     def fetch(
         self,
@@ -58,26 +73,48 @@ class YahooConnector:
         if yf is None:
             raise RuntimeError("yfinance is not installed")
 
-        yahoo_sym = self._yahoo_ticker(ticker)
-        logger.info("Fetching %s (%s) from %s to %s", ticker, yahoo_sym, start, end)
-
         # Convert to date-only strings to avoid yfinance datetime parsing errors
         start_str = start.strftime("%Y-%m-%d") if isinstance(start, datetime) else str(start).split(" ")[0]
         end_str = end.strftime("%Y-%m-%d") if isinstance(end, datetime) else str(end).split(" ")[0]
+        last_error: Exception | None = None
 
-        df = yf.download(yahoo_sym, start=start_str, end=end_str, progress=False, auto_adjust=True)
+        for yahoo_sym in self._yahoo_tickers(ticker):
+            logger.info("Fetching %s (%s) from %s to %s", ticker, yahoo_sym, start, end)
+            try:
+                df = yf.download(
+                    yahoo_sym,
+                    start=start_str,
+                    end=end_str,
+                    progress=False,
+                    auto_adjust=True,
+                    threads=False,
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Yahoo download failed for %s via %s: %s", ticker, yahoo_sym, exc)
+                continue
 
-        if df.empty:
+            if df.empty:
+                logger.warning("No data returned for %s via %s", ticker, yahoo_sym)
+                continue
+
+            # Flatten MultiIndex columns if present
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            df = df.reset_index()
+            df = df.rename(columns={"index": "Date"} if "Date" not in df.columns else {})
+            missing = [column for column in self.REQUIRED_COLUMNS if column not in df.columns]
+            if missing:
+                logger.warning("Yahoo response missing columns for %s via %s: %s", ticker, yahoo_sym, missing)
+                continue
+            return df[["Date"] + self.REQUIRED_COLUMNS]
+
+        if last_error is not None:
+            logger.warning("All Yahoo symbol candidates failed for %s: %s", ticker, last_error)
+        else:
             logger.warning("No data returned for %s", ticker)
-            return pd.DataFrame(columns=["Date"] + self.REQUIRED_COLUMNS)
-
-        # Flatten MultiIndex columns if present
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        df = df.reset_index()
-        df = df.rename(columns={"index": "Date"} if "Date" not in df.columns else {})
-        return df[["Date"] + self.REQUIRED_COLUMNS]
+        return pd.DataFrame(columns=["Date"] + self.REQUIRED_COLUMNS)
 
     def fetch_to_csv(
         self,
