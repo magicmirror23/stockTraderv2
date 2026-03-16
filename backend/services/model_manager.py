@@ -104,14 +104,16 @@ class ModelManager:
     def get_model_info(self) -> dict[str, Any]:
         registry = self._read_registry()
         metrics = {}
+        last_trained = None
         for entry in registry.get("models", []):
             if entry.get("version") == self._last_loaded_version:
                 metrics = entry.get("metrics", {})
+                last_trained = entry.get("timestamp")
                 break
         return {
             "model_version": self._model_version,
             "status": self._status,
-            "last_trained": metrics.get("timestamp"),
+            "last_trained": last_trained,
             "accuracy": metrics.get("test_accuracy"),
             "fallback": self._status == "demo_fallback",
             "last_error": self._last_error,

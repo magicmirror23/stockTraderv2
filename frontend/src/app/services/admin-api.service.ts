@@ -18,9 +18,16 @@ export interface ModelReloadResponse {
 
 export interface ModelVersion {
   version: string;
-  created_at: string;
+  created_at?: string;
+  timestamp?: string;
   accuracy?: number;
   status?: string;
+  metrics?: Record<string, unknown>;
+}
+
+export interface RegistryVersionsResponse {
+  latest: string | null;
+  versions: ModelVersion[];
 }
 
 export interface DriftResult {
@@ -95,8 +102,8 @@ export class AdminApiService {
     return this.http.get<RetrainLogsResponse>(`${this.base}/retrain/logs?after=${after}`);
   }
 
-  getRegistryVersions(): Observable<ModelVersion[]> {
-    return this.http.get<ModelVersion[]>(`${this.base}/registry/versions`);
+  getRegistryVersions(): Observable<RegistryVersionsResponse> {
+    return this.http.get<RegistryVersionsResponse>(`${this.base}/registry/versions`);
   }
 
   getMLflowVersion(): Observable<Record<string, unknown>> {

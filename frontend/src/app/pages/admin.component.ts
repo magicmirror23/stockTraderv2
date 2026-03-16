@@ -75,6 +75,9 @@ import { NotificationService } from '../services/notification.service';
               <span *ngIf="retrainStatus.last_started_at"> | started {{ retrainStatus.last_started_at | date:'medium' }}</span>
               <span *ngIf="retrainStatus.last_finished_at"> | finished {{ retrainStatus.last_finished_at | date:'medium' }}</span>
             </div>
+            <div class="text-sm text-muted mt-1" *ngIf="retrainStatus?.running">
+              Current active model stays on the previous version until retraining finishes successfully.
+            </div>
             <div class="text-sm text-sell mt-1" *ngIf="retrainStatus?.error">
               {{ retrainStatus?.error }}
             </div>
@@ -161,10 +164,12 @@ import { NotificationService } from '../services/notification.service';
               <tbody>
                 <tr *ngFor="let v of versions">
                   <td class="text-mono"><strong>{{ v.version }}</strong></td>
-                  <td>{{ v.created_at | date:'medium' }}</td>
-                  <td>{{ v.accuracy !== undefined && v.accuracy !== null ? ((v.accuracy * 100) | number:'1.1-1') + '%' : 'N/A' }}</td>
+                  <td>{{ (v.created_at || v.timestamp) ? ((v.created_at || v.timestamp) | date:'medium') : 'N/A' }}</td>
+                  <td>{{ resolveVersionAccuracy(v) !== null ? ((resolveVersionAccuracy(v)! * 100) | number:'1.1-1') + '%' : 'N/A' }}</td>
                   <td>
-                    <span class="badge" [ngClass]="v.status === 'active' ? 'badge-success' : 'badge-neutral'">{{ v.status || 'archived' }}</span>
+                    <span class="badge" [ngClass]="(v.version === latestRegistryVersion || v.status === 'active') ? 'badge-success' : 'badge-neutral'">
+                      {{ (v.version === latestRegistryVersion || v.status === 'active') ? 'active' : (v.status || 'archived') }}
+                    </span>
                   </td>
                 </tr>
               </tbody>
@@ -247,6 +252,7 @@ export class AdminComponent implements OnInit, OnDestroy {
 
   versions: ModelVersion[] = [];
   versionsLoading = false;
+  latestRegistryVersion: string | null = null;
 
   canary: CanaryStatus | null = null;
   canaryLoading = false;
@@ -395,11 +401,22 @@ export class AdminComponent implements OnInit, OnDestroy {
     this.versionsLoading = true;
     this.adminApi.getRegistryVersions().subscribe({
       next: v => {
-        this.versions = Array.isArray(v) ? v : [];
+        this.latestRegistryVersion = v.latest ?? null;
+        this.versions = Array.isArray(v.versions) ? v.versions : [];
         this.versionsLoading = false;
       },
       error: () => { this.versionsLoading = false; }
     });
+  }
+
+  resolveVersionAccuracy(version: ModelVersion): number | null {
+    if (typeof version.accuracy === 'number') {
+      return version.accuracy;
+    }
+    if (typeof version.metrics?.['test_accuracy'] === 'number') {
+      return version.metrics['test_accuracy'] as number;
+    }
+    return null;
   }
 
   loadCanary(): void {

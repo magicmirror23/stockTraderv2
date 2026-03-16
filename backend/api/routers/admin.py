@@ -39,6 +39,14 @@ _retrain_logs: list[dict[str, Any]] = []
 _retrain_log_lock = threading.Lock()
 _retrain_log_cursor = 0
 _MAX_RETRAIN_LOG_LINES = 400
+_RETRAIN_LOGGER_PREFIXES = (
+    "backend.prediction_engine",
+    "backend.services.training_data",
+    "backend.services.model_manager",
+    "backend.services.mlflow_registry",
+    "backend.services.monitoring",
+    "yfinance",
+)
 
 
 def _require_auth(authorization: str = Header(None)):
@@ -57,6 +65,8 @@ class _RetrainLogHandler(logging.Handler):
     """Capture training logs in memory for the admin panel."""
 
     def emit(self, record: logging.LogRecord) -> None:
+        if not _should_capture_retrain_log(record):
+            return
         try:
             message = record.getMessage()
         except Exception:
@@ -79,6 +89,17 @@ def _append_retrain_log(level: str, logger_name: str, message: str) -> None:
         )
         if len(_retrain_logs) > _MAX_RETRAIN_LOG_LINES:
             del _retrain_logs[: len(_retrain_logs) - _MAX_RETRAIN_LOG_LINES]
+
+
+def _should_capture_retrain_log(record: logging.LogRecord) -> bool:
+    logger_name = record.name or ""
+    if logger_name == "backend.core.middleware":
+        return False
+    if logger_name.startswith(_RETRAIN_LOGGER_PREFIXES):
+        return True
+    if logger_name == "yfinance":
+        return True
+    return record.levelno >= logging.WARNING
 
 
 def _clear_retrain_logs() -> None:
