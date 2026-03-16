@@ -27,6 +27,7 @@ router = APIRouter(tags=["admin"])
 _retrain_status: dict[str, Any] = {
     "running": False,
     "progress": None,
+    "progress_percent": 0,
     "error": None,
     "message": None,
     "model_version": None,
@@ -39,6 +40,7 @@ _retrain_logs: list[dict[str, Any]] = []
 _retrain_log_lock = threading.Lock()
 _retrain_log_cursor = 0
 _MAX_RETRAIN_LOG_LINES = 400
+_last_progress_logged: dict[str, Any] = {"stage": None, "percent": -1}
 _RETRAIN_LOGGER_PREFIXES = (
     "backend.prediction_engine",
     "backend.services.training_data",
@@ -55,10 +57,22 @@ def _require_auth(authorization: str = Header(None)):
     return authorization.split(" ", 1)[1]
 
 
-def _run_train_sync() -> dict:
+def _run_train_sync(progress_callback=None) -> dict:
     """Run training in a thread – never call from the event loop directly."""
     from backend.prediction_engine.training.trainer import train
-    return train()
+    return train(progress_callback=progress_callback)
+
+
+def _update_retrain_progress(stage: str, percent: int, message: str) -> None:
+    _retrain_status.update(progress=stage, progress_percent=percent, message=message)
+    should_log = (
+        _last_progress_logged["stage"] != stage
+        or percent in {0, 100}
+        or percent - int(_last_progress_logged["percent"]) >= 5
+    )
+    if should_log:
+        _last_progress_logged.update(stage=stage, percent=percent)
+        logger.info("Retrain progress %s%% [%s] %s", percent, stage, message)
 
 
 class _RetrainLogHandler(logging.Handler):
@@ -105,6 +119,7 @@ def _should_capture_retrain_log(record: logging.LogRecord) -> bool:
 def _clear_retrain_logs() -> None:
     with _retrain_log_lock:
         _retrain_logs.clear()
+    _last_progress_logged.update(stage=None, percent=-1)
 
 
 def _get_retrain_logs(after: int = 0) -> tuple[list[dict[str, Any]], int]:
@@ -120,9 +135,9 @@ async def _run_retrain_background() -> None:
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
     try:
-        _retrain_status["progress"] = "training"
+        _update_retrain_progress("training", 2, "Retrain background job started")
         _append_retrain_log("INFO", __name__, "Retrain background job started")
-        entry = await asyncio.to_thread(_run_train_sync)
+        entry = await asyncio.to_thread(_run_train_sync, _update_retrain_progress)
 
         try:
             from backend.services.mlflow_registry import log_model_training
@@ -136,12 +151,14 @@ async def _run_retrain_background() -> None:
             logger.debug("MLflow logging skipped")
 
         mgr = ModelManager()
+        _update_retrain_progress("loading_model", 98, "Loading newly trained model")
         mgr.load_latest()
 
         record_retrain("success")
         _retrain_status.update(
             running=False,
             progress="done",
+            progress_percent=100,
             error=None,
             message="Retrain completed",
             model_version=entry["version"],
@@ -157,6 +174,7 @@ async def _run_retrain_background() -> None:
         _retrain_status.update(
             running=False,
             progress="failed",
+            progress_percent=100,
             error=str(exc),
             message="Retrain failed",
             last_finished_at=datetime.now(timezone.utc).isoformat(),
@@ -184,6 +202,7 @@ async def retrain_logs(
         "next_cursor": next_cursor,
         "running": _retrain_status["running"],
         "progress": _retrain_status["progress"],
+        "progress_percent": _retrain_status["progress_percent"],
     }
 
 
@@ -199,12 +218,14 @@ async def retrain(token: str = Depends(_require_auth)):
             "message": "Retrain already in progress",
             "status": "running",
             "progress": _retrain_status["progress"],
+            "progress_percent": _retrain_status["progress_percent"],
             "last_started_at": _retrain_status["last_started_at"],
         }
 
     _retrain_status.update(
         running=True,
         progress="queued",
+        progress_percent=0,
         error=None,
         message="Retrain started",
         model_version=None,
@@ -222,6 +243,7 @@ async def retrain(token: str = Depends(_require_auth)):
         "message": "Retrain started",
         "status": "queued",
         "progress": "queued",
+        "progress_percent": 0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
