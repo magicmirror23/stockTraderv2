@@ -13,6 +13,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -25,15 +26,17 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from backend.prediction_engine.feature_store.feature_store import build_features  # noqa: E402
 from backend.prediction_engine.models.lightgbm_model import LightGBMModel  # noqa: E402
+from backend.core.config import settings  # noqa: E402
 from backend.services.training_data import ensure_training_data, load_training_tickers  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-ARTIFACTS_DIR = REPO_ROOT / "models" / "artifacts"
-REGISTRY_PATH = REPO_ROOT / "models" / "registry.json"
+ARTIFACTS_DIR = settings.model_artifacts_path
+REGISTRY_PATH = settings.model_registry_path
 
 SEED = 42
 PURGE_GAP = 10  # days gap between splits to prevent look-ahead leakage
+ProgressCallback = Callable[[str, int, str], None]
 
 
 # ---------------------------------------------------------------------------
@@ -149,11 +152,17 @@ NUMERIC_FEATURES = [
 # Main training routine
 # ---------------------------------------------------------------------------
 
+
+def _emit_progress(callback: ProgressCallback | None, stage: str, percent: int, message: str) -> None:
+    if callback is not None:
+        callback(stage, max(0, min(percent, 100)), message)
+
 def train(
     tickers: list[str] | None = None,
     data_dir: str | Path = "storage/raw",
     horizon: int = 1,
     seed: int = SEED,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     """Run the full training pipeline.
 
@@ -167,8 +176,19 @@ def train(
     if tickers is None:
         tickers = load_training_tickers()
 
-    refresh_report = ensure_training_data(tickers=tickers, data_dir=data_dir)
+    _emit_progress(progress_callback, "refreshing_data", 5, "Refreshing training CSV data")
+    refresh_report = ensure_training_data(
+        tickers=tickers,
+        data_dir=data_dir,
+        progress_callback=lambda current, total, message: _emit_progress(
+            progress_callback,
+            "refreshing_data",
+            5 + int((current / max(total, 1)) * 35),
+            message,
+        ),
+    )
 
+    _emit_progress(progress_callback, "building_features", 45, "Building training features")
     logger.info("Building features for %d tickers …", len(tickers))
     features = build_features(tickers, data_dir=data_dir)
 
@@ -203,15 +223,23 @@ def train(
     # Train
     model = LightGBMModel(seed=seed)
     logger.info("Training LightGBM binary (train=%d, val=%d) …", len(X_train), len(X_val))
+    _emit_progress(progress_callback, "training_model", 60, "Training LightGBM model")
     metrics = model.train(
         X_train, y_train,
         val_X=X_val, val_y=y_val,
         num_boost_round=1200,
         early_stopping_rounds=100,
         class_weight=sample_weights,
+        progress_callback=lambda percent, message: _emit_progress(
+            progress_callback,
+            "training_model",
+            60 + int(percent * 0.3),
+            message,
+        ),
     )
 
     # Test evaluation — binary accuracy (direction prediction)
+    _emit_progress(progress_callback, "evaluating_model", 92, "Evaluating trained model")
     test_proba = model.predict_proba(X_test)
     if test_proba.ndim == 2:
         test_proba = test_proba[:, 1] if test_proba.shape[1] == 2 else test_proba[:, 0]
@@ -241,6 +269,7 @@ def train(
     # Save artifact
     version = model.get_version()
     artifact_path = ARTIFACTS_DIR / version
+    _emit_progress(progress_callback, "saving_model", 96, f"Saving trained model {version}")
     model.save(artifact_path)
     logger.info("Model saved → %s", artifact_path)
 
@@ -256,6 +285,7 @@ def train(
         "data_refresh": refresh_report.to_dict(),
     }
     _update_registry(entry)
+    _emit_progress(progress_callback, "completed", 100, f"Retrain completed for model {version}")
     return entry
 
 

@@ -75,7 +75,7 @@ class ModelManager:
                 self._activate_demo_fallback("registry_missing")
                 return self._model_version
 
-            artifact_path = settings.model_registry_path.parent / "artifacts" / version
+            artifact_path = settings.model_artifacts_path / version
             if not artifact_path.exists():
                 self._activate_demo_fallback(f"artifact_missing:{version}")
                 return self._model_version

@@ -7,6 +7,7 @@ import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
@@ -15,6 +16,7 @@ from backend.prediction_engine.data_pipeline.connector_yahoo import YahooConnect
 
 
 logger = logging.getLogger(__name__)
+RefreshProgressCallback = Callable[[int, int, str], None]
 
 
 @dataclass
@@ -50,6 +52,7 @@ def ensure_training_data(
     data_dir: str | Path | None = None,
     lookback_days: int | None = None,
     max_age_days: int | None = None,
+    progress_callback: RefreshProgressCallback | None = None,
 ) -> TrainingDataRefreshReport:
     """Refresh missing or stale training CSV files before model training."""
     resolved_tickers = load_training_tickers(tickers)
@@ -76,13 +79,16 @@ def ensure_training_data(
     )
 
     valid_names = {f"{ticker}.csv" for ticker in resolved_tickers}
+    total = len(resolved_tickers)
+    if progress_callback and total > 0:
+        progress_callback(0, total, "Checking training CSV cache")
     for stale_path in output_dir.glob("*.csv"):
         if stale_path.name not in valid_names:
             stale_path.unlink(missing_ok=True)
             report.deleted.append(stale_path.stem.upper())
             logger.info("Deleted stale training CSV not in ticker list: %s", stale_path.name)
 
-    for ticker in resolved_tickers:
+    for index, ticker in enumerate(resolved_tickers, start=1):
         path = output_dir / f"{ticker}.csv"
         needs_refresh = not path.exists()
         reason = "missing"
@@ -129,6 +135,9 @@ def ensure_training_data(
             logger.warning("Failed to refresh training CSV for %s: %s", ticker, exc)
             if path.exists():
                 report.reused.append(ticker)
+        finally:
+            if progress_callback:
+                progress_callback(index, total, f"Processed training data for {ticker}")
 
     if report.failed and len(report.failed) == len(resolved_tickers):
         raise RuntimeError("Unable to refresh any training CSV files")

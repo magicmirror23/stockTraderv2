@@ -54,6 +54,7 @@ class Settings(BaseSettings):
 
     MODEL_REGISTRY_PATH: str = str(DEFAULT_MODEL_REGISTRY)
     STORAGE_PATH: str = str(DEFAULT_STORAGE_PATH)
+    PERSISTENT_DATA_ROOT: str | None = None
     WATCHLIST_SYMBOLS: str = "RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,NIFTY50"
     TRAINING_DATA_LOOKBACK_DAYS: int = 730
     TRAINING_DATA_MAX_AGE_DAYS: int = 3
@@ -129,15 +130,25 @@ class Settings(BaseSettings):
 
     @property
     def model_registry_path(self) -> Path:
-        return Path(self.MODEL_REGISTRY_PATH)
+        return self._resolve_runtime_path(self.MODEL_REGISTRY_PATH)
 
     @property
     def storage_path(self) -> Path:
-        return Path(self.STORAGE_PATH)
+        return self._resolve_runtime_path(self.STORAGE_PATH)
 
     @property
     def raw_data_path(self) -> Path:
         return self.storage_path / "raw"
+
+    @property
+    def model_artifacts_path(self) -> Path:
+        return self.model_registry_path.parent / "artifacts"
+
+    @property
+    def persistent_data_root(self) -> Path | None:
+        if not self.PERSISTENT_DATA_ROOT:
+            return None
+        return Path(self.PERSISTENT_DATA_ROOT)
 
     @property
     def watchlist_symbols(self) -> list[str]:
@@ -146,6 +157,10 @@ class Settings(BaseSettings):
     @property
     def training_tickers_file(self) -> Path:
         return Path(self.TRAINING_TICKERS_FILE)
+
+    @property
+    def persistence_enabled(self) -> bool:
+        return self.persistent_data_root is not None
 
     @property
     def run_mode(self) -> str:
@@ -162,6 +177,20 @@ class Settings(BaseSettings):
         if self.PAPER_MODE:
             return "paper"
         return self.run_mode
+
+    def ensure_runtime_directories(self) -> None:
+        self.storage_path.mkdir(parents=True, exist_ok=True)
+        self.raw_data_path.mkdir(parents=True, exist_ok=True)
+        self.model_registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.model_artifacts_path.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_runtime_path(self, raw_value: str) -> Path:
+        path = Path(raw_value)
+        if path.is_absolute():
+            return path
+        if self.persistent_data_root is not None:
+            return self.persistent_data_root / path
+        return PROJECT_ROOT / path
 
 
 @lru_cache

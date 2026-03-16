@@ -12,6 +12,12 @@ from starlette.requests import Request
 
 
 logger = logging.getLogger(__name__)
+_QUIET_SUCCESS_PATHS = {
+    "/api/v1/health",
+    "/api/v1/health/info",
+    "/api/v1/retrain/status",
+    "/api/v1/retrain/logs",
+}
 
 _request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -44,7 +50,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         response.headers["x-request-id"] = request_id
-        logger.info(
+        log_fn = logger.debug if request.url.path in _QUIET_SUCCESS_PATHS and response.status_code < 400 else logger.info
+        log_fn(
             "request_completed",
             extra={
                 "request_id": request_id,

@@ -71,9 +71,15 @@ import { NotificationService } from '../services/notification.service';
             </div>
             <div class="text-sm text-muted mt-1" *ngIf="retrainStatus">
               Retrain status:
-              <strong>{{ retrainStatus.progress || (retrainStatus.running ? 'running' : 'idle') }}</strong>
+              <strong>{{ formatRetrainStage(retrainStatus.progress, retrainStatus.running) }}</strong>
+              <span *ngIf="retrainStatus.progress_percent !== undefined && retrainStatus.progress_percent !== null">
+                ({{ retrainStatus.progress_percent }}%)
+              </span>
               <span *ngIf="retrainStatus.last_started_at"> | started {{ retrainStatus.last_started_at | date:'medium' }}</span>
               <span *ngIf="retrainStatus.last_finished_at"> | finished {{ retrainStatus.last_finished_at | date:'medium' }}</span>
+            </div>
+            <div class="progress-shell" *ngIf="retrainStatus">
+              <div class="progress-fill" [style.width.%]="retrainStatus.progress_percent || 0"></div>
             </div>
             <div class="text-sm text-muted mt-1" *ngIf="retrainStatus?.running">
               Current active model stays on the previous version until retraining finishes successfully.
@@ -233,6 +239,22 @@ import { NotificationService } from '../services/notification.service';
       line-height: 1.45;
       white-space: pre-wrap;
       word-break: break-word;
+    }
+
+    .progress-shell {
+      margin-top: 0.75rem;
+      height: 10px;
+      width: 100%;
+      border-radius: 999px;
+      background: #dbe4f0;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #0f766e, #14b8a6);
+      transition: width 0.35s ease;
     }
   `]
 })
@@ -417,6 +439,13 @@ export class AdminComponent implements OnInit, OnDestroy {
       return version.metrics['test_accuracy'] as number;
     }
     return null;
+  }
+
+  formatRetrainStage(stage: string | null | undefined, running: boolean): string {
+    if (!stage) {
+      return running ? 'running' : 'idle';
+    }
+    return stage.replace(/_/g, ' ');
   }
 
   loadCanary(): void {

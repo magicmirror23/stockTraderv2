@@ -25,7 +25,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings.ensure_runtime_directories()
     logger.info("Application startup", extra={"mode": settings.run_mode})
+    logger.info(
+        "Runtime storage ready: storage=%s registry=%s artifacts=%s persistent=%s",
+        settings.storage_path,
+        settings.model_registry_path,
+        settings.model_artifacts_path,
+        settings.persistence_enabled,
+        extra={"mode": settings.run_mode},
+    )
     model_manager = get_model_manager()
     price_feed = get_price_feed()
     model_manager.ensure_loaded()

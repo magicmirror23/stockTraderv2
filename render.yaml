@@ -29,6 +29,8 @@ services:
         value: models/registry.json
       - key: STORAGE_PATH
         value: storage
+      - key: PERSISTENT_DATA_ROOT
+        sync: false
       - key: TRAINING_DATA_LOOKBACK_DAYS
         value: "730"
       - key: TRAINING_DATA_MAX_AGE_DAYS
@@ -43,6 +45,15 @@ services:
         sync: false
 
 # Optional future upgrades:
+# To persist trained models and refreshed CSVs across deploys/restarts,
+# upgrade the web service plan and mount a disk similar to:
+#    disk:
+#      name: stocktrader-data
+#      mountPath: /var/data
+#      sizeGB: 1
+# Then set:
+#    PERSISTENT_DATA_ROOT=/var/data/stocktrader
+#
 # databases:
 #   - name: stocktrader-db
 #     plan: free

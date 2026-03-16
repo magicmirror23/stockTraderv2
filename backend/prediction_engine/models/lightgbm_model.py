@@ -6,7 +6,7 @@ import json
 import pickle
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -71,6 +71,7 @@ class LightGBMModel(BaseModel):
         val_X = kwargs.get("val_X")
         val_y = kwargs.get("val_y")
         class_weight = kwargs.get("class_weight")  # optional per-sample weights
+        progress_callback: Callable[[int, str], None] | None = kwargs.get("progress_callback")
 
         dtrain = lgb.Dataset(X, label=y, weight=class_weight)
         valid_sets = [dtrain]
@@ -82,6 +83,16 @@ class LightGBMModel(BaseModel):
             valid_sets.append(dval)
             valid_names.append("val")
             callbacks.append(lgb.early_stopping(early_stopping_rounds))
+
+        if progress_callback is not None:
+            def report_progress(env: Any) -> None:
+                total_rounds = max(num_boost_round, 1)
+                current_round = min(env.iteration + 1, total_rounds)
+                percent = int((current_round / total_rounds) * 100)
+                if current_round == 1 or current_round % 10 == 0 or current_round == total_rounds:
+                    progress_callback(percent, f"LightGBM round {current_round}/{total_rounds}")
+
+            callbacks.append(report_progress)
 
         self._model = lgb.train(
             self._params,

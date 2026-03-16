@@ -52,6 +52,7 @@ export interface CanaryStatus {
 export interface RetrainStatus {
   running: boolean;
   progress: string | null;
+  progress_percent?: number | null;
   error: string | null;
   message?: string | null;
   model_version?: string | null;
@@ -74,6 +75,7 @@ export interface RetrainLogsResponse {
   next_cursor: number;
   running: boolean;
   progress: string | null;
+  progress_percent?: number | null;
 }
 
 @Injectable({ providedIn: 'root' })
