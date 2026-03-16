@@ -1,4 +1,4 @@
-const RENDER_BACKEND_URL = 'https://stocktrader-api.onrender.com';
+const RENDER_BACKEND_URL = 'https://stocktraderv2.onrender.com';
 
 export const environment = {
   production: true,
