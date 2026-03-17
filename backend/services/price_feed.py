@@ -18,6 +18,7 @@ from backend.services.market_hours import MarketPhase, get_market_status
 
 logger = logging.getLogger(__name__)
 DEFAULT_WATCHLIST = settings.watchlist_symbols or ["RELIANCE", "TCS", "INFY"]
+CORE_INDICES = ["NIFTY50", "BANKNIFTY", "SENSEX"]
 
 
 @dataclass
@@ -98,7 +99,12 @@ class PriceFeed:
     def feed_status(self) -> dict[str, Any]:
         live = self._angel.snapshot()
         market = self.market_status
-        serving_mode = "live" if self.is_market_open and self._angel.is_connected else "last_close"
+        if self.is_market_open and self._angel.is_connected:
+            serving_mode = "live"
+        elif self.is_market_open and settings.replay_enabled and self.has_replay_data:
+            serving_mode = "replay"
+        else:
+            serving_mode = "last_close"
         return {
             "mode": self.feed_mode,
             "connected": self._angel.is_connected,
@@ -159,7 +165,7 @@ class PriceFeed:
     def get_latest_price(self, symbol: str) -> PriceTick | None:
         symbol = symbol.upper()
         if self.is_market_open and self._angel.is_connected:
-            live = self._angel.get_latest(symbol)
+            live = self._get_live_snapshot(symbol)
             if live:
                 tick = self._tick_from_dict(live, self.feed_mode)
                 self._latest[symbol] = tick
@@ -182,6 +188,9 @@ class PriceFeed:
             return
         async for tick in self._replay_single(symbol, speed=speed, recent_days=recent_days):
             yield tick
+        if self.is_market_open and self._angel.is_connected:
+            async for tick in self._live_single(symbol):
+                yield tick
 
     async def stream_multi(self, symbols: list[str], speed: float = 10.0, recent_days: int = 20) -> AsyncIterator[PriceTick]:
         if not self.is_market_open:
@@ -197,11 +206,14 @@ class PriceFeed:
             return
         async for tick in self._replay_multi(symbols, speed=speed, recent_days=recent_days):
             yield tick
+        if self.is_market_open and self._angel.is_connected:
+            async for tick in self._live_multi(symbols):
+                yield tick
 
     async def _live_single(self, symbol: str) -> AsyncIterator[PriceTick]:
         last_seen: str | None = None
         while True:
-            live = self._angel.get_latest(symbol.upper())
+            live = self._get_live_snapshot(symbol.upper())
             if live and live.get("timestamp") != last_seen:
                 last_seen = live["timestamp"]
                 tick = self._tick_from_dict(live, "live")
@@ -217,7 +229,7 @@ class PriceFeed:
         last_seen: dict[str, str] = {}
         while self.feed_mode == "live":
             for symbol in symbols:
-                live = self._angel.get_latest(symbol.upper())
+                live = self._get_live_snapshot(symbol.upper())
                 if live and live.get("timestamp") != last_seen.get(symbol.upper()):
                     last_seen[symbol.upper()] = live["timestamp"]
                     tick = self._tick_from_dict(live, "live")
@@ -226,6 +238,28 @@ class PriceFeed:
             await asyncio.sleep(0.3)
         async for tick in self._replay_multi(symbols, speed=12.0, recent_days=10):
             yield tick
+
+    def _get_live_snapshot(self, symbol: str) -> dict[str, Any] | None:
+        symbol = symbol.upper()
+        live = self._angel.get_latest(symbol)
+        if live is None:
+            return self._angel.fetch_quote(symbol)
+
+        source = live.get("source")
+        timestamp = live.get("timestamp")
+        is_stale = False
+        if isinstance(timestamp, str):
+            try:
+                parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                is_stale = (datetime.now(timezone.utc) - parsed) > timedelta(seconds=3)
+            except ValueError:
+                is_stale = True
+
+        if source == "angel_one_quote" or is_stale:
+            refreshed = self._angel.fetch_quote(symbol)
+            if refreshed:
+                return refreshed
+        return live
 
     async def _replay_single(self, symbol: str, speed: float, recent_days: int) -> AsyncIterator[PriceTick]:
         frame = self._load_frame(symbol)
@@ -237,6 +271,8 @@ class PriceFeed:
         for index, row in frame.iterrows():
             prev_close = float(frame.iloc[index - 1]["Close"]) if index > 0 else float(row["Open"])
             for tick in self._row_to_ticks(symbol.upper(), row, prev_close, n_ticks=12):
+                if self.is_market_open and self._angel.is_connected:
+                    return
                 self._latest[symbol.upper()] = tick
                 yield tick
                 await asyncio.sleep(delay)
@@ -255,6 +291,8 @@ class PriceFeed:
         all_ticks.sort(key=lambda item: item.timestamp)
         delay = max(0.05, 0.3 / max(speed, 1.0))
         for tick in all_ticks:
+            if self.is_market_open and self._angel.is_connected:
+                return
             self._latest[tick.symbol] = tick
             yield tick
             await asyncio.sleep(delay)
@@ -269,7 +307,8 @@ class PriceFeed:
         return snapshot
 
     def get_market_overview(self) -> dict[str, Any]:
-        snapshot = self.get_watchlist_snapshot(self.available_symbols()[:20])
+        requested_symbols = list(dict.fromkeys([*CORE_INDICES, *self.available_symbols()[:20]]))
+        snapshot = self.get_watchlist_snapshot(requested_symbols)
         if not snapshot:
             return {
                 "mode": self.feed_mode,

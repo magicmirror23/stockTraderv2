@@ -74,6 +74,32 @@ class AngelLiveFeed:
         with self._lock:
             return self._latest_ticks.get(symbol.upper())
 
+    def fetch_quote(self, symbol: str) -> dict[str, Any] | None:
+        """Fetch a fresh quote on demand when websocket ticks are not available yet."""
+        symbol = symbol.upper()
+        if not settings.live_broker_enabled:
+            return None
+        if not self._authenticate():
+            return None
+        resolved = self._resolve_tokens([symbol])
+        if symbol not in resolved or symbol not in self._tokens or self._smart_api is None:
+            return None
+
+        info = self._tokens[symbol]
+        exchange = "BSE" if info.get("exchange") == BSE_CM else "NSE"
+        try:
+            data = self._smart_api.ltpData(exchange, info["tradingsymbol"], info["token"])
+            payload = (data or {}).get("data", {}) or {}
+            normalized = self._normalize_quote(symbol, payload)
+            with self._lock:
+                self._latest_ticks[symbol] = normalized
+                self._status["last_event_at"] = normalized["timestamp"]
+            return normalized
+        except Exception as exc:
+            logger.warning("Angel quote fetch failed for %s: %s", symbol, exc)
+            self._set_status(last_error=f"quote_fetch_failed:{symbol}")
+            return None
+
     def start(self, symbols: list[str]) -> dict[str, Any]:
         if not settings.live_broker_enabled:
             return self._set_status(
@@ -97,9 +123,15 @@ class AngelLiveFeed:
 
         try:
             from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-        except ImportError:
+        except ImportError as exc:
             fallback_mode = "replay" if settings.replay_enabled else "unavailable"
-            return self._set_status(mode=fallback_mode, connected=False, last_error="smartapi_websocket_missing")
+            missing = exc.name or str(exc)
+            logger.warning("Angel websocket import failed: %s", missing)
+            return self._set_status(
+                mode=fallback_mode,
+                connected=False,
+                last_error=f"smartapi_websocket_missing:{missing}",
+            )
 
         token_list: dict[int, list[str]] = {}
         for symbol in resolved:
@@ -170,8 +202,10 @@ class AngelLiveFeed:
         try:
             from SmartApi import SmartConnect
             import pyotp
-        except ImportError:
-            self._set_status(last_error="smartapi_dependencies_missing")
+        except ImportError as exc:
+            missing = exc.name or str(exc)
+            logger.warning("Angel auth dependencies missing: %s", missing)
+            self._set_status(last_error=f"smartapi_dependencies_missing:{missing}")
             return False
 
         try:
@@ -260,6 +294,41 @@ class AngelLiveFeed:
             "change": change,
             "change_pct": change_pct,
             "source": "angel_one",
+        }
+
+    def _normalize_quote(self, symbol: str, payload: dict[str, Any]) -> dict[str, Any]:
+        def rupees(value: Any) -> float | None:
+            if value in (None, ""):
+                return None
+            try:
+                return round(float(value), 2)
+            except (TypeError, ValueError):
+                return None
+
+        price = rupees(payload.get("ltp")) or 0.0
+        prev_close = (
+            rupees(payload.get("close"))
+            or rupees(payload.get("prevclose"))
+            or rupees(payload.get("prev_close"))
+            or price
+        )
+        change = round(price - prev_close, 2) if prev_close else 0.0
+        change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+        return {
+            "symbol": symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "price": price,
+            "volume": int(payload.get("tradeVolume") or payload.get("volume") or 0),
+            "bid": rupees(payload.get("bid")),
+            "ask": rupees(payload.get("ask")),
+            "open": rupees(payload.get("open")),
+            "high": rupees(payload.get("high")),
+            "low": rupees(payload.get("low")),
+            "close": price,
+            "prev_close": prev_close,
+            "change": change,
+            "change_pct": change_pct,
+            "source": "angel_one_quote",
         }
 
     def _fallback(self, error: str) -> None:

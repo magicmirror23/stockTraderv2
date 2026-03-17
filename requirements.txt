@@ -31,6 +31,7 @@ sentry-sdk[fastapi]>=2.0,<3.0
 
 # Broker integrations
 smartapi-python>=1.4,<2.0
+logzero>=1.7,<2.0
 pyotp>=2.9,<3.0
 websocket-client>=1.8,<2.0
 

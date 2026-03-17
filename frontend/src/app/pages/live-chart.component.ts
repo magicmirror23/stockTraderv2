@@ -182,7 +182,7 @@ export class LiveChartComponent implements OnInit, OnDestroy {
 
   loadFeedStatus(): void {
     this.liveStream.getFeedStatus().subscribe({
-      next: s => this.feedMode = s.feed_mode || 'replay',
+      next: s => this.feedMode = s.feed_mode || s.mode || 'replay',
       error: () => {}
     });
   }
@@ -191,8 +191,11 @@ export class LiveChartComponent implements OnInit, OnDestroy {
     this.connectingLive = true;
     this.liveStream.connectLive([this.symbol.trim().toUpperCase()]).subscribe({
       next: res => {
-        this.feedMode = res.feed_mode || (res.connected ? 'live' : 'replay');
+        this.feedMode = res.feed_mode || res.mode || (res.connected ? 'live' : 'replay');
         this.connectingLive = false;
+        if (res.connected) {
+          this.startStream();
+        }
       },
       error: () => { this.connectingLive = false; }
     });

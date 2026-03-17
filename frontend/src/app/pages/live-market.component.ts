@@ -461,8 +461,30 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
   `]
 })
 export class LiveMarketComponent implements OnInit, OnDestroy {
-  symbolInput = 'RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK';
-  placeholderSymbols = 'RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK';
+  private readonly defaultStreamSymbols = [
+    'RELIANCE',
+    'TCS',
+    'HDFCBANK',
+    'INFY',
+    'ICICIBANK',
+    'SBIN',
+    'BHARTIARTL',
+    'LT',
+    'AXISBANK',
+    'ITC',
+    'BAJFINANCE',
+    'MARUTI',
+    'SUNPHARMA',
+    'TATAMOTORS',
+    'ADANIPORTS',
+    'TATASTEEL',
+    'ADANIENT',
+    'HAL',
+    'INDIGO',
+    'TATAPOWER',
+  ];
+  symbolInput = this.defaultStreamSymbols.join(',');
+  placeholderSymbols = this.defaultStreamSymbols.join(',');
   connected = false;
   tickCount = 0;
   feedMode = 'replay';
@@ -488,6 +510,7 @@ export class LiveMarketComponent implements OnInit, OnDestroy {
   private marketTimer: any;
   private overviewTimer: any;
   private chartDataMap = new Map<string, PriceTick[]>();
+  private readonly coreIndices = ['NIFTY50', 'BANKNIFTY', 'SENSEX'];
 
   constructor(
     private liveStream: LiveStreamService,
@@ -511,6 +534,12 @@ export class LiveMarketComponent implements OnInit, OnDestroy {
         this.tickCount++;
         // Track feed mode from incoming ticks
         if (tick.feed_mode) this.feedMode = tick.feed_mode;
+        if (this.coreIndices.includes(tick.symbol)) {
+          const nextIndices = this.indicesData.filter(item => item.symbol !== tick.symbol);
+          this.indicesData = [...nextIndices, tick].sort(
+            (a, b) => this.coreIndices.indexOf(a.symbol) - this.coreIndices.indexOf(b.symbol)
+          );
+        }
         // Update trade feed (newest first, max 50)
         this.tradeFeed = [tick, ...this.tradeFeed.slice(0, 49)];
         // Update per-symbol chart data
@@ -570,7 +599,7 @@ export class LiveMarketComponent implements OnInit, OnDestroy {
   }
 
   startStream(): void {
-    const symbols = this.symbolInput.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+    const symbols = this.requestedSymbols();
     if (symbols.length === 0) return;
     this.tickCount = 0;
     this.tradeFeed = [];
@@ -586,7 +615,7 @@ export class LiveMarketComponent implements OnInit, OnDestroy {
   }
 
   loadSnapshot(): void {
-    const symbols = this.symbolInput.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+    const symbols = this.requestedSymbols();
     this.liveStream.getWatchlistSnapshot(symbols.length ? symbols : undefined).subscribe({
       next: res => {
         const map = new Map<string, WatchlistItem>();
@@ -673,18 +702,21 @@ export class LiveMarketComponent implements OnInit, OnDestroy {
 
   loadFeedStatus(): void {
     this.liveStream.getFeedStatus().subscribe({
-      next: s => this.feedMode = s.feed_mode || 'replay',
+      next: s => this.feedMode = s.feed_mode || s.mode || 'replay',
       error: () => {}
     });
   }
 
   connectLiveFeed(): void {
     this.connectingLive = true;
-    const symbols = this.symbolInput.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+    const symbols = this.requestedSymbols();
     this.liveStream.connectLive(symbols.length ? symbols : undefined).subscribe({
       next: res => {
-        this.feedMode = res.feed_mode || (res.connected ? 'live' : 'replay');
+        this.feedMode = res.feed_mode || res.mode || (res.connected ? 'live' : 'replay');
         this.connectingLive = false;
+        if (res.connected) {
+          this.startStream();
+        }
       },
       error: () => { this.connectingLive = false; }
     });
@@ -695,6 +727,11 @@ export class LiveMarketComponent implements OnInit, OnDestroy {
       next: res => { this.feedMode = res.feed_mode || 'replay'; },
       error: () => {}
     });
+  }
+
+  private requestedSymbols(): string[] {
+    const requested = this.symbolInput.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+    return [...new Set([...this.coreIndices, ...requested])];
   }
 
   ngOnDestroy(): void {

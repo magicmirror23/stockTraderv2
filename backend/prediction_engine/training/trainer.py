@@ -24,11 +24,13 @@ from sklearn.preprocessing import StandardScaler
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
-from backend.prediction_engine.feature_store.feature_store import (  # noqa: E402
-    NEWS_AGGREGATE_FEATURE_COLUMNS,
-    build_features,
+from backend.prediction_engine.feature_store.feature_store import NEWS_AGGREGATE_FEATURE_COLUMNS, build_features  # noqa: E402
+from backend.prediction_engine.feature_store.normalization import (  # noqa: E402
+    normalize_features_per_ticker,
+    rolling_zscore_or_zero,
 )
 from backend.prediction_engine.data_pipeline.connector_news import topic_feature_columns  # noqa: E402
+from backend.prediction_engine.model_features import MODEL_INPUT_COLUMNS  # noqa: E402
 from backend.prediction_engine.models.lightgbm_model import LightGBMModel  # noqa: E402
 from backend.core.config import settings  # noqa: E402
 from backend.services.brokerage_calculator import TradeType, calculate_charges  # noqa: E402
@@ -80,45 +82,8 @@ def _build_labels(
     return labels
 
 
-# Features that are already bounded / normalised and should NOT be z-scored
-_BOUNDED_FEATURES = {
-    "rsi_14", "bb_pct_b", "stoch_k", "stoch_d", "williams_r",
-    "price_pos_52w", "volume_spike", "rsi_divergence",
-    "high_low_ratio", "close_to_ma20", "close_to_ma50", "day_of_week",
-    "breadth_up_ratio", "breadth_above_sma50", "news_geopolitical_risk_30d",
-    *{col for col in [*topic_feature_columns(), *NEWS_AGGREGATE_FEATURE_COLUMNS] if "sentiment" in col},
-}
-
-
-def _normalize_features_per_ticker(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
-    """Z-score normalize only unbounded features per ticker.
-
-    Bounded indicators (RSI, stochastic, etc.) keep their natural scale
-    to preserve their semantic meaning.
-    """
-    df = df.copy()
-    for col in feature_cols:
-        if col in df.columns and col not in _BOUNDED_FEATURES:
-            df[col] = df.groupby("ticker")[col].transform(
-                _rolling_zscore_or_zero
-            )
-    return df
-
-
-def _rolling_zscore_or_zero(series: pd.Series, window: int = 60, min_periods: int = 20) -> pd.Series:
-    """Rolling z-score that preserves warm-up NaNs but keeps flat windows at 0.
-
-    Constant columns are common for sparse news features.  Those windows should
-    be treated as neutral rather than making the entire training set invalid.
-    """
-    mean = series.rolling(window, min_periods=min_periods).mean()
-    std = series.rolling(window, min_periods=min_periods).std()
-    normalized = (series - mean) / std.replace(0, np.nan)
-
-    warmup_mask = mean.isna() | std.isna()
-    flat_mask = (~warmup_mask) & std.le(0)
-    normalized = normalized.mask(flat_mask, 0.0)
-    return normalized
+_normalize_features_per_ticker = normalize_features_per_ticker
+_rolling_zscore_or_zero = rolling_zscore_or_zero
 
 
 def _prepare_training_frame(features: pd.DataFrame, horizon: int) -> pd.DataFrame:
@@ -135,6 +100,7 @@ def _prepare_training_frame(features: pd.DataFrame, horizon: int) -> pd.DataFram
         raise ValueError("No labelled samples remained after applying the training horizon")
 
     features = _normalize_features_per_ticker(features, NUMERIC_FEATURES)
+    features[NUMERIC_FEATURES] = features[NUMERIC_FEATURES].replace([np.inf, -np.inf], np.nan)
     features = features.dropna(subset=NUMERIC_FEATURES).reset_index(drop=True)
 
     if features.empty:
@@ -183,35 +149,7 @@ def _walk_forward_split(
 # Feature columns used for training (exclude non-numeric)
 # ---------------------------------------------------------------------------
 
-NUMERIC_FEATURES = [
-    # Normalised price relationships (no raw prices - they don't generalise)
-    "rsi_14", "macd", "macd_signal", "macd_hist",
-    "volatility_20", "return_1d", "return_5d", "log_return_1d",
-    "volume_spike", "volume_ratio",
-    # Trend & mean-reversion
-    "adx_14", "bb_width", "bb_pct_b", "stoch_k",
-    "distance_sma50", "momentum_10", "gap_pct",
-    # Additional features for improved accuracy
-    "vwap_dist", "obv_slope", "williams_r", "cci_20",
-    "roc_10", "ema_crossover", "return_2d", "return_3d",
-    "return_10d", "distance_sma200", "price_pos_52w",
-    "stoch_d", "rsi_divergence",
-    # Demo-strategy features
-    "force_index", "high_low_ratio",
-    "return_mean_5", "return_mean_10", "return_skew_10",
-    "volume_change", "close_to_ma20", "close_to_ma50",
-    "return_lag_1", "return_lag_5", "day_of_week",
-    # Market, macro, and regime context
-    "market_return_1d", "market_return_5d", "market_trend_20", "market_volatility_20",
-    "india_vix_close", "india_vix_return_5d", "usd_inr_return_5d",
-    "brent_return_5d", "gold_return_5d", "sp500_return_1d", "us10y_change_5d",
-    "macro_stress_score", "breadth_up_ratio", "breadth_above_sma50",
-    "market_median_return_1d", "market_dispersion_5d",
-    "excess_return_1d", "excess_return_5d", "rolling_beta_20", "rolling_corr_20",
-    # News and event context
-    *topic_feature_columns(),
-    *NEWS_AGGREGATE_FEATURE_COLUMNS,
-]
+NUMERIC_FEATURES = MODEL_INPUT_COLUMNS
 
 
 # ---------------------------------------------------------------------------

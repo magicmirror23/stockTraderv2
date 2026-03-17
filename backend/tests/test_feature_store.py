@@ -11,6 +11,8 @@ from backend.prediction_engine.feature_store.feature_store import (
     get_features_for_inference,
     FEATURE_COLUMNS,
 )
+from backend.prediction_engine.feature_store.normalization import normalize_features_per_ticker
+from backend.prediction_engine.model_features import MODEL_INPUT_COLUMNS
 from backend.services import news_context as news_context_module
 from backend.services import training_data as training_data_module
 
@@ -135,3 +137,24 @@ def test_news_features_are_lagged_for_training_but_recent_for_inference(tmp_path
 
     inference_row = get_features_for_inference("SAMPLE", data_dir=tmp_path, news_dir=news_dir)
     assert inference_row["india_market_sentiment_30d"] == expected_same_day
+
+
+def test_inference_uses_training_normalization_contract(tmp_path, monkeypatch):
+    _write_synthetic_ohlcv(tmp_path, "SAMPLE", periods=260)
+
+    class _DummyNewsManager:
+        def ensure_recent(self, force: bool = False):
+            return None
+
+    monkeypatch.setattr(news_context_module, "get_news_context_manager", lambda: _DummyNewsManager())
+    monkeypatch.setattr(training_data_module, "load_training_tickers", lambda: ["SAMPLE"])
+
+    raw = build_features(["SAMPLE"], data_dir=tmp_path, news_mode="inference")
+    normalized = normalize_features_per_ticker(raw.copy(), MODEL_INPUT_COLUMNS)
+    normalized = normalized.dropna(subset=MODEL_INPUT_COLUMNS).reset_index(drop=True)
+
+    inference_row = get_features_for_inference("SAMPLE", data_dir=tmp_path)
+
+    assert inference_row["close"] == pytest.approx(float(normalized.iloc[-1]["close"]))
+    assert inference_row["macd"] == pytest.approx(float(normalized.iloc[-1]["macd"]))
+    assert inference_row["market_return_1d"] == pytest.approx(float(normalized.iloc[-1]["market_return_1d"]))

@@ -18,6 +18,8 @@ import pandas as pd
 
 from backend.core.config import settings
 from backend.prediction_engine.data_pipeline.connector_news import topic_feature_columns, topic_queries
+from backend.prediction_engine.feature_store.normalization import normalize_features_per_ticker
+from backend.prediction_engine.model_features import MODEL_INPUT_COLUMNS
 from backend.prediction_engine.feature_store import transforms as T
 
 logger = logging.getLogger(__name__)
@@ -589,9 +591,19 @@ def get_features_for_inference(
         if feat.empty:
             raise ValueError(f"No feature rows for {ticker} on or before {timestamp}")
 
+    latest_news = _latest_news_snapshot(resolved_news_dir)
+    latest_index = feat.index[-1]
+    for column, value in latest_news.items():
+        feat.loc[latest_index, column] = value
+
+    # Keep inference numerically aligned with training by reusing the same
+    # per-ticker normalization contract before selecting the latest row.
+    feat = normalize_features_per_ticker(feat, MODEL_INPUT_COLUMNS)
+    feat = feat.dropna(subset=MODEL_INPUT_COLUMNS).reset_index(drop=True)
+    if feat.empty:
+        raise ValueError(f"No normalized feature rows for {ticker}")
+
     row = feat.iloc[-1].copy()
-    for column, value in _latest_news_snapshot(resolved_news_dir).items():
-        row[column] = value
     return {col: row[col] for col in FEATURE_COLUMNS}
 
 

@@ -1,5 +1,4 @@
 date,avg_sentiment,headline_count,sentiment_7d,sentiment_30d,headline_count_7d,headline_count_30d
-2025-03-16,0.0,0,0.0,0.0,0.0,0.0
 2025-03-17,0.0,0,0.0,0.0,0.0,0.0
 2025-03-18,0.0,0,0.0,0.0,0.0,0.0
 2025-03-19,0.0,0,0.0,0.0,0.0,0.0
@@ -365,3 +364,4 @@ date,avg_sentiment,headline_count,sentiment_7d,sentiment_30d,headline_count_7d,h
 2026-03-14,0.0,0,0.0,0.0,0.0,0.0
 2026-03-15,0.0,0,0.0,0.0,0.0,0.0
 2026-03-16,0.0,0,0.0,0.0,0.0,0.0
+2026-03-17,0.0,0,0.0,0.0,0.0,0.0

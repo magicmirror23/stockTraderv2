@@ -56,6 +56,7 @@ export class LiveStreamService {
   private ws: WebSocket | null = null;
   private sse: EventSource | null = null;
   private readonly base = environment.apiUrl;
+  private readonly wsOpenTimeoutMs = 2500;
 
   readonly tick$ = new Subject<LiveTick>();
   readonly watchlist$ = new BehaviorSubject<Map<string, WatchlistItem>>(new Map());
@@ -112,10 +113,40 @@ export class LiveStreamService {
       return;
     }
 
+    let opened = false;
+    let fallbackTriggered = false;
+    let openTimer: any = null;
+
+    const fallbackToSse = () => {
+      if (fallbackTriggered) return;
+      fallbackTriggered = true;
+      clearTimeout(openTimer);
+      if (this.ws) {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onerror = null;
+        this.ws.onclose = null;
+        try {
+          if (this.ws.readyState === WebSocket.OPEN) {
+            this.ws.close();
+          }
+        } catch {}
+        this.ws = null;
+      }
+      this.connectSSE(symbols);
+    };
+
     try {
       this.ws = new WebSocket(wsUrl);
+      openTimer = setTimeout(() => {
+        if (!opened) {
+          fallbackToSse();
+        }
+      }, this.wsOpenTimeoutMs);
 
       this.ws.onopen = () => {
+        opened = true;
+        clearTimeout(openTimer);
         this.connected$.next(true);
         this.reconnectDelay = 1000;
         this.state$.next('connected');
@@ -137,8 +168,24 @@ export class LiveStreamService {
         });
       };
 
-      this.ws.onerror = () => this.ws?.close();
-      this.ws.onclose = () => this.scheduleReconnect();
+      this.ws.onerror = () => {
+        if (!opened) {
+          fallbackToSse();
+          return;
+        }
+        this.ws?.close();
+      };
+
+      this.ws.onclose = () => {
+        clearTimeout(openTimer);
+        if (!opened && !fallbackTriggered) {
+          fallbackToSse();
+          return;
+        }
+        if (!fallbackTriggered) {
+          this.scheduleReconnect();
+        }
+      };
     } catch {
       this.connectSSE(symbols);
     }
@@ -220,7 +267,9 @@ export class LiveStreamService {
     this.lastSymbols = [];
     clearTimeout(this.reconnectTimer);
     if (this.ws) {
-      this.ws.close();
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.close();
+      }
       this.ws = null;
     }
     if (this.sse) {

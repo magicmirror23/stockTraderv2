@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from backend.trading_engine.account_state import AccountState
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +72,33 @@ class RiskManager:
         """Refresh capital from the broker's available balance."""
         self.capital = available_cash
         logger.debug("RiskManager capital updated to ₹%.2f", available_cash)
+
+    def sync_account_state(self, account_state: AccountState) -> None:
+        """Replace cached risk state with the latest broker or paper state."""
+        self.capital = max(account_state.buying_power, account_state.available_cash, 0.0)
+        synced_positions: dict[str, PositionRisk] = {}
+        for position in account_state.combined_positions().values():
+            if position.sellable_quantity <= 0:
+                continue
+            synced = PositionRisk(
+                ticker=position.ticker,
+                side="buy",
+                entry_price=position.average_price,
+                quantity=position.sellable_quantity,
+                highest_price=position.market_price or position.average_price,
+                lowest_price=position.market_price or position.average_price,
+            )
+            synced.update_trailing_stop(
+                position.market_price or position.average_price,
+                self.config.trailing_stop_pct,
+            )
+            synced_positions[position.ticker] = synced
+        self.positions = synced_positions
+        logger.debug(
+            "RiskManager synced from account state: capital=₹%.2f, positions=%d",
+            self.capital,
+            len(self.positions),
+        )
 
     def can_open_position(self, ticker: str, price: float, quantity: int) -> tuple[bool, str]:
         """Check whether a new position is allowed under risk rules.

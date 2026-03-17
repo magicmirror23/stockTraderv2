@@ -19,11 +19,13 @@ from backend.api.schemas import (
 )
 from backend.db.models import AuditLog, Fill, Order
 from backend.db.session import SessionLocal
+from backend.services.risk_manager import RiskConfig
+from backend.trading_engine.account_state import ValidationRules
 from backend.trading_engine.angel_adapter import get_adapter
+from backend.trading_engine.execution_engine import AccountStateExecutionEngine
 
 router = APIRouter(tags=["trading"])
 
-# In-memory intent store
 _intents: dict[str, dict] = {}
 
 
@@ -37,6 +39,21 @@ def _get_adapter():
         return _adapter_instance
 
 
+def _get_execution_engine() -> AccountStateExecutionEngine:
+    global _execution_engine
+    try:
+        return _execution_engine
+    except NameError:
+        rules = ValidationRules(
+            allow_pyramiding=False,
+            max_position_size_pct=RiskConfig().max_position_pct,
+            max_portfolio_exposure_pct=RiskConfig().max_portfolio_risk_pct,
+            max_open_positions=RiskConfig().max_open_positions,
+        )
+        _execution_engine = AccountStateExecutionEngine(validation_rules=rules)
+        return _execution_engine
+
+
 def _require_auth(authorization: str = Header(None)):
     """Simple bearer-token guard for protected endpoints."""
     if not authorization or not authorization.startswith("Bearer "):
@@ -44,19 +61,80 @@ def _require_auth(authorization: str = Header(None)):
     return authorization.split(" ", 1)[1]
 
 
+def _load_current_price(adapter, intent: dict) -> float:
+    if intent.get("limit_price"):
+        return float(intent["limit_price"])
+    ltp = adapter.get_ltp(intent["ticker"])
+    if ltp and ltp.get("ltp"):
+        return float(ltp["ltp"])
+    return 100.0
+
+
+def _persist_execution(
+    *,
+    execution_id: str,
+    intent_id: str,
+    intent: dict,
+    result: dict,
+    status: str,
+) -> None:
+    try:
+        db = SessionLocal()
+        order = Order(
+            id=execution_id,
+            intent_id=intent_id,
+            ticker=intent["ticker"],
+            side=intent["side"],
+            quantity=intent["quantity"],
+            order_type=intent["order_type"],
+            limit_price=intent.get("limit_price"),
+            status=status,
+            option_type=intent.get("option_type"),
+            strike=intent.get("strike"),
+            expiry=intent.get("expiry"),
+            strategy=intent.get("strategy"),
+        )
+        db.add(order)
+        if status in {"filled", "placed"}:
+            fill = Fill(
+                order_id=execution_id,
+                ticker=intent["ticker"],
+                side=intent["side"],
+                quantity=intent["quantity"],
+                filled_price=float(result.get("filled_price") or intent.get("limit_price") or 0.0),
+                slippage=float(result.get("slippage") or 0.0),
+                latency_ms=float(result.get("latency_ms") or 0.0),
+                commission=0,
+                option_type=intent.get("option_type"),
+                strike=intent.get("strike"),
+                expiry=intent.get("expiry"),
+                strategy=intent.get("strategy"),
+            )
+            db.add(fill)
+        audit = AuditLog(
+            event="ORDER_EXECUTION_ATTEMPT",
+            entity_type="order",
+            entity_id=execution_id,
+            data=json.dumps(result),
+        )
+        db.add(audit)
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
 @router.post("/trade_intent", response_model=TradeIntentResponse, status_code=201)
 async def trade_intent(req: TradeIntentRequest):
-    # Validate limit-price rule
     if req.order_type.value == "limit" and req.limit_price is None:
         raise HTTPException(status_code=400, detail="limit_price required for limit orders")
 
     intent_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
-
-    estimated_cost = req.quantity * (req.limit_price or 100.0)  # placeholder price
+    estimated_cost = req.quantity * (req.limit_price or 100.0)
 
     _intents[intent_id] = {
-        "ticker": req.ticker,
+        "ticker": req.ticker.upper(),
         "side": req.side.value,
         "quantity": req.quantity,
         "order_type": req.order_type.value,
@@ -72,7 +150,7 @@ async def trade_intent(req: TradeIntentRequest):
 
     return TradeIntentResponse(
         intent_id=uuid.UUID(intent_id),
-        ticker=req.ticker,
+        ticker=req.ticker.upper(),
         side=req.side,
         quantity=req.quantity,
         order_type=req.order_type,
@@ -89,88 +167,58 @@ async def trade_intent(req: TradeIntentRequest):
 
 @router.post("/execute", response_model=ExecuteResponse)
 async def execute(req: ExecuteRequest, token: str = Depends(_require_auth)):
+    del token
     intent_id = str(req.intent_id)
-
     if intent_id not in _intents:
         raise HTTPException(status_code=404, detail="Trade intent not found")
 
     intent = _intents[intent_id]
+    adapter = _get_adapter()
+    current_price = _load_current_price(adapter, intent)
+    outcome = _get_execution_engine().execute_with_adapter(
+        adapter=adapter,
+        order_intent={
+            "ticker": intent["ticker"],
+            "side": intent["side"],
+            "quantity": intent["quantity"],
+            "order_type": intent["order_type"],
+            "limit_price": intent.get("limit_price"),
+            "option_type": intent.get("option_type"),
+            "strike": intent.get("strike"),
+            "expiry": intent.get("expiry"),
+            "strategy": intent.get("strategy"),
+        },
+        current_price=current_price,
+    )
 
-    # Place order via adapter (pass option fields)
-    result = _get_adapter().place_order({
-        "ticker": intent["ticker"],
-        "side": intent["side"],
-        "quantity": intent["quantity"],
-        "order_type": intent["order_type"],
-        "current_price": intent.get("limit_price") or 100.0,
-        "option_type": intent.get("option_type"),
-        "strike": intent.get("strike"),
-        "expiry": intent.get("expiry"),
-        "strategy": intent.get("strategy"),
-    })
+    if not outcome.accepted:
+        raise HTTPException(status_code=422, detail=outcome.reason or "Order rejected")
 
-    if result.get("status") != "filled":
-        raise HTTPException(status_code=500, detail="Order execution failed")
-
-    execution_id = uuid.uuid4()
+    result = outcome.broker_result or {}
+    execution_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
-
-    # Persist to DB (best-effort; skip if DB not available)
-    try:
-        db = SessionLocal()
-        order = Order(
-            id=str(execution_id),
-            intent_id=intent_id,
-            ticker=intent["ticker"],
-            side=intent["side"],
-            quantity=intent["quantity"],
-            order_type=intent["order_type"],
-            limit_price=intent.get("limit_price"),
-            status="filled",
-            option_type=intent.get("option_type"),
-            strike=intent.get("strike"),
-            expiry=intent.get("expiry"),
-            strategy=intent.get("strategy"),
-        )
-        fill = Fill(
-            order_id=str(execution_id),
-            ticker=intent["ticker"],
-            side=intent["side"],
-            quantity=intent["quantity"],
-            filled_price=result["filled_price"],
-            slippage=result.get("slippage", 0),
-            latency_ms=result.get("latency_ms", 0),
-            commission=0,
-            option_type=intent.get("option_type"),
-            strike=intent.get("strike"),
-            expiry=intent.get("expiry"),
-            strategy=intent.get("strategy"),
-        )
-        audit = AuditLog(
-            event="ORDER_EXECUTED",
-            entity_type="order",
-            entity_id=str(execution_id),
-            data=json.dumps(result),
-        )
-        db.add_all([order, fill, audit])
-        db.commit()
-        db.close()
-    except Exception:
-        pass  # graceful degradation if DB not configured
-
-    intent["status"] = "filled"
-
-    return ExecuteResponse(
+    status = str(result.get("status") or "placed").lower()
+    _persist_execution(
         execution_id=execution_id,
+        intent_id=intent_id,
+        intent=intent,
+        result=result,
+        status=status,
+    )
+    intent["status"] = status
+
+    filled_price = float(result.get("filled_price") or current_price)
+    return ExecuteResponse(
+        execution_id=uuid.UUID(execution_id),
         intent_id=req.intent_id,
         ticker=intent["ticker"],
         side=OrderSide(intent["side"]),
         quantity=intent["quantity"],
-        filled_price=result["filled_price"],
-        total_value=result["filled_price"] * intent["quantity"],
-        slippage=result.get("slippage", 0),
-        latency_ms=result.get("latency_ms", 0),
-        status="filled",
+        filled_price=filled_price,
+        total_value=filled_price * intent["quantity"],
+        slippage=float(result.get("slippage") or 0.0),
+        latency_ms=float(result.get("latency_ms") or 0.0),
+        status=status,
         option_type=OptionType(intent["option_type"]) if intent.get("option_type") else None,
         strike=intent.get("strike"),
         expiry=intent.get("expiry"),

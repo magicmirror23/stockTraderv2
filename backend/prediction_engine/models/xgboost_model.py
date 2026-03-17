@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from backend.prediction_engine.models.base_model import BaseModel
 
@@ -48,6 +49,13 @@ class XGBoostModel(BaseModel):
         self._version: str = ""
         self._trained_at: datetime | None = None
         self._best_threshold: float = 0.5
+        self._metrics: dict[str, Any] = {}
+
+    @staticmethod
+    def _sanitize_matrix(X: np.ndarray | pd.DataFrame) -> np.ndarray:
+        frame = pd.DataFrame(X).replace([np.inf, -np.inf], np.nan)
+        frame = frame.ffill().bfill().fillna(0.0)
+        return frame.to_numpy(dtype=float)
 
     def train(
         self,
@@ -61,6 +69,15 @@ class XGBoostModel(BaseModel):
             raise RuntimeError("xgboost is not installed")
         p = {**self._params, **(params or {})}
         seed = p.pop("random_state", 42)
+        p.pop("use_label_encoder", None)
+
+        X = self._sanitize_matrix(X)
+        sanitized_eval_set = None
+        if eval_set is not None:
+            sanitized_eval_set = [
+                (self._sanitize_matrix(eval_X), np.asarray(eval_y))
+                for eval_X, eval_y in eval_set
+            ]
 
         # Compute scale_pos_weight for class imbalance
         num_pos = int(np.sum(y == 1))
@@ -72,11 +89,16 @@ class XGBoostModel(BaseModel):
             **p, random_state=seed, early_stopping_rounds=early_stopping_rounds
         )
         fit_kwargs: dict[str, Any] = {"verbose": False}
-        if eval_set is not None:
-            fit_kwargs["eval_set"] = eval_set
+        if sanitized_eval_set is not None:
+            fit_kwargs["eval_set"] = sanitized_eval_set
         self._model.fit(X, y, **fit_kwargs)
         self._trained_at = datetime.now(timezone.utc)
         self._version = f"xgb_{self._trained_at.strftime('%Y%m%d_%H%M%S')}"
+        train_preds = self._model.predict(X)
+        self._metrics = {
+            "accuracy": float((train_preds == y).mean()),
+            "best_iteration": getattr(self._model, "best_iteration", None),
+        }
 
     def optimize_threshold(self, X_val: np.ndarray, y_val: np.ndarray) -> float:
         """Search for optimal decision threshold on validation set."""
@@ -96,15 +118,15 @@ class XGBoostModel(BaseModel):
     def predict(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not trained or loaded")
-        prob = self._model.predict_proba(X)[:, 1]
+        prob = self._model.predict_proba(self._sanitize_matrix(X))[:, 1]
         return (prob >= self._best_threshold).astype(int)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         if self._model is None:
             raise RuntimeError("Model not trained or loaded")
-        return self._model.predict_proba(X)
+        return self._model.predict_proba(self._sanitize_matrix(X))
 
-    def save(self, path: str | Path) -> None:
+    def save(self, path: str | Path) -> Path:
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         with open(path / "model.pkl", "wb") as f:
@@ -115,18 +137,24 @@ class XGBoostModel(BaseModel):
             "trained_at": self._trained_at.isoformat() if self._trained_at else None,
             "params": self._params,
             "best_threshold": self._best_threshold,
+            "metrics": self._metrics,
         }
         (path / "meta.json").write_text(json.dumps(meta, indent=2))
+        return path
 
-    def load(self, path: str | Path) -> None:
+    @classmethod
+    def load(cls, path: str | Path) -> "XGBoostModel":
         path = Path(path)
+        instance = cls()
         with open(path / "model.pkl", "rb") as f:
-            self._model = pickle.load(f)
+            instance._model = pickle.load(f)
         meta_path = path / "meta.json"
         if meta_path.exists():
             meta = json.loads(meta_path.read_text())
-            self._version = meta.get("version", "")
-            self._best_threshold = meta.get("best_threshold", 0.5)
+            instance._version = meta.get("version", "")
+            instance._best_threshold = meta.get("best_threshold", 0.5)
+            instance._metrics = meta.get("metrics", {})
+        return instance
 
     def get_version(self) -> str:
         return self._version

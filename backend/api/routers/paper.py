@@ -1,11 +1,6 @@
-"""Paper trading API routes.
-
-Endpoints for paper account management, order placement, and replay.
-"""
+"""Paper trading API routes."""
 
 from __future__ import annotations
-
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
@@ -19,13 +14,30 @@ from backend.api.schemas import (
 from backend.paper_trading.paper_account import PaperAccountManager
 from backend.paper_trading.paper_executor import PaperExecutor
 from backend.paper_trading.paper_replayer import PaperReplayer
+from backend.services.risk_manager import RiskConfig
+from backend.trading_engine.account_state import ValidationRules, fetch_paper_account_state
+from backend.trading_engine.execution_engine import AccountStateExecutionEngine
 
 router = APIRouter(tags=["paper-trading"])
 
-# Singleton instances
 _account_manager = PaperAccountManager()
 _executor = PaperExecutor()
 _replayer = PaperReplayer(executor=_executor)
+
+
+def _get_execution_engine() -> AccountStateExecutionEngine:
+    global _execution_engine
+    try:
+        return _execution_engine
+    except NameError:
+        rules = ValidationRules(
+            allow_pyramiding=False,
+            max_position_size_pct=RiskConfig().max_position_pct,
+            max_portfolio_exposure_pct=RiskConfig().max_portfolio_risk_pct,
+            max_open_positions=RiskConfig().max_open_positions,
+        )
+        _execution_engine = AccountStateExecutionEngine(validation_rules=rules)
+        return _execution_engine
 
 
 @router.post("/paper/accounts", response_model=PaperAccountResponse, status_code=201)
@@ -71,20 +83,20 @@ async def get_account_metrics(account_id: str):
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    trades = account.trade_log
+    trades = [trade for trade in account.trade_log if trade.get("side") == "sell"]
     if not trades:
         return {
             "sharpe": None, "sortino": None, "max_drawdown": None,
             "win_rate": None, "total_trades": 0, "net_pnl": 0,
         }
 
-    pnls = [t.get("pnl", 0) for t in trades]
+    pnls = [trade.get("realized_pnl", trade.get("pnl", 0)) for trade in trades]
     import numpy as np
+
     pnl_arr = np.array(pnls)
-    wins = sum(1 for p in pnls if p > 0)
+    wins = sum(1 for pnl in pnls if pnl > 0)
     net_pnl = float(pnl_arr.sum())
 
-    # Simple Sharpe approximation
     if len(pnl_arr) > 1 and pnl_arr.std() > 0:
         sharpe = float(pnl_arr.mean() / pnl_arr.std() * np.sqrt(252))
         downside = pnl_arr[pnl_arr < 0]
@@ -96,16 +108,15 @@ async def get_account_metrics(account_id: str):
         sharpe = None
         sortino = None
 
-    # Drawdown from equity curve
     max_drawdown = None
     if account.equity_curve:
         equities = [pt["equity"] for pt in account.equity_curve]
         peak = equities[0]
         max_dd = 0
-        for eq in equities:
-            peak = max(peak, eq)
-            dd = (peak - eq) / peak if peak > 0 else 0
-            max_dd = max(max_dd, dd)
+        for equity in equities:
+            peak = max(peak, equity)
+            drawdown = (peak - equity) / peak if peak > 0 else 0
+            max_dd = max(max_dd, drawdown)
         max_drawdown = max_dd
 
     return {
@@ -124,16 +135,31 @@ async def paper_order_intent(account_id: str, req: PaperOrderIntentRequest):
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    # Get market price
     from backend.services.price_feed import PriceFeed
+
     feed = PriceFeed()
     tick = feed.get_latest_price(req.ticker)
     if not tick:
         raise HTTPException(status_code=404, detail=f"No price data for {req.ticker}")
 
+    before_state, validation = _get_execution_engine().validate_paper_order(
+        account=account,
+        order_intent={
+            "ticker": req.ticker.upper(),
+            "side": req.side.value,
+            "quantity": req.quantity,
+            "option_type": req.option_type.value if req.option_type else None,
+            "strike": req.strike,
+            "expiry": req.expiry,
+        },
+        current_price=tick.price,
+    )
+    if not validation.allowed:
+        raise HTTPException(status_code=422, detail=validation.reason)
+
     fill = _executor.execute_order(
         account=account,
-        ticker=req.ticker,
+        ticker=req.ticker.upper(),
         side=req.side.value,
         quantity=req.quantity,
         market_price=tick.price,
@@ -143,16 +169,39 @@ async def paper_order_intent(account_id: str, req: PaperOrderIntentRequest):
     )
 
     if not fill:
-        raise HTTPException(status_code=422, detail="Order not filled")
+        raise HTTPException(
+            status_code=422,
+            detail=_executor.last_rejection_reason or "Order not filled",
+        )
 
+    after_state = fetch_paper_account_state(account)
     return {
         "ticker": fill.ticker,
         "side": fill.side,
         "quantity": fill.quantity,
         "fill_price": fill.fill_price,
         "slippage": fill.slippage,
+        "commission": fill.commission,
         "status": fill.status,
         "timestamp": fill.timestamp.isoformat(),
+        "account_state_before": {
+            "available_cash": before_state.available_cash,
+            "buying_power": before_state.buying_power,
+            "total_equity": before_state.total_equity,
+            "holdings": {
+                key: {"quantity": position.quantity, "avg_price": position.average_price}
+                for key, position in before_state.combined_positions().items()
+            },
+        },
+        "account_state_after": {
+            "available_cash": after_state.available_cash,
+            "buying_power": after_state.buying_power,
+            "total_equity": after_state.total_equity,
+            "holdings": {
+                key: {"quantity": position.quantity, "avg_price": position.average_price}
+                for key, position in after_state.combined_positions().items()
+            },
+        },
     }
 
 

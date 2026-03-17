@@ -9,6 +9,7 @@ import threading
 from typing import Any
 
 from backend.core.config import settings
+from backend.prediction_engine.model_features import MODEL_INPUT_COLUMNS
 from backend.prediction_engine.models.lightgbm_model import LightGBMModel
 
 
@@ -126,11 +127,10 @@ class ModelManager:
 
         try:
             import pandas as pd
-            from backend.prediction_engine.feature_store.feature_store import FEATURE_COLUMNS, get_features_for_inference
+            from backend.prediction_engine.feature_store.feature_store import get_features_for_inference
 
             feat_dict = get_features_for_inference(ticker)
-            numeric_cols = [c for c in FEATURE_COLUMNS if c not in ("ticker", "date")]
-            X = pd.DataFrame([{c: feat_dict[c] for c in numeric_cols}])
+            X = pd.DataFrame([{c: feat_dict[c] for c in MODEL_INPUT_COLUMNS}])
             results = self._model.predict_with_expected_return(
                 X,
                 price=float(feat_dict.get("close", 0.0) or 0.0),

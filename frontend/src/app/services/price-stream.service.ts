@@ -17,6 +17,7 @@ const INITIAL_RECONNECT_DELAY = 1000;
 @Injectable({ providedIn: 'root' })
 export class PriceStreamService {
   readonly state$ = new BehaviorSubject<PriceStreamState>('waking backend');
+  private readonly wsOpenTimeoutMs = 2500;
 
   constructor(
     private ngZone: NgZone,
@@ -30,9 +31,32 @@ export class PriceStreamService {
         : '';
       const sseUrl = `${environment.apiUrl}/stream/price/${encodeURIComponent(symbol)}`;
       let ws: WebSocket | null = null;
+      let sse: EventSource | null = null;
       let delay = INITIAL_RECONNECT_DELAY;
       let reconnectTimer: any = null;
       let stopped = false;
+      let opened = false;
+      let fallbackTriggered = false;
+      let openTimer: any = null;
+
+      const fallbackToSse = () => {
+        if (stopped || fallbackTriggered) return;
+        fallbackTriggered = true;
+        clearTimeout(openTimer);
+        if (ws) {
+          ws.onopen = null;
+          ws.onmessage = null;
+          ws.onerror = null;
+          ws.onclose = null;
+          try {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.close();
+            }
+          } catch {}
+          ws = null;
+        }
+        connectSse();
+      };
 
       const connectWs = () => {
         if (stopped || !wsUrl) {
@@ -42,8 +66,17 @@ export class PriceStreamService {
         this.state$.next('waking backend');
         this.backendStatus.setWaking();
         try {
+          opened = false;
+          fallbackTriggered = false;
           ws = new WebSocket(wsUrl);
+          openTimer = setTimeout(() => {
+            if (!opened) {
+              fallbackToSse();
+            }
+          }, this.wsOpenTimeoutMs);
           ws.onopen = () => {
+            opened = true;
+            clearTimeout(openTimer);
             delay = INITIAL_RECONNECT_DELAY;
             this.state$.next('connected');
             this.backendStatus.setOnline();
@@ -59,9 +92,20 @@ export class PriceStreamService {
               subscriber.next(payload.type === 'tick' ? payload : payload);
             });
           };
-          ws.onerror = () => ws?.close();
+          ws.onerror = () => {
+            if (!opened) {
+              fallbackToSse();
+              return;
+            }
+            ws?.close();
+          };
           ws.onclose = () => {
+            clearTimeout(openTimer);
             if (stopped) return;
+            if (!opened && !fallbackTriggered) {
+              fallbackToSse();
+              return;
+            }
             this.state$.next('reconnecting');
             reconnectTimer = setTimeout(() => {
               delay = Math.min(delay * 2, MAX_RECONNECT_DELAY);
@@ -74,9 +118,10 @@ export class PriceStreamService {
       };
 
       const connectSse = () => {
-        const source = new EventSource(sseUrl);
+        sse?.close();
+        sse = new EventSource(sseUrl);
         this.state$.next('waking backend');
-        source.onmessage = (event) => {
+        sse.onmessage = (event) => {
           this.ngZone.run(() => {
             const payload = JSON.parse(event.data);
             if (payload.type === 'status') {
@@ -88,8 +133,9 @@ export class PriceStreamService {
             subscriber.next(payload.type === 'tick' ? payload : payload);
           });
         };
-        source.onerror = () => {
-          source.close();
+        sse.onerror = () => {
+          sse?.close();
+          sse = null;
           if (stopped) return;
           this.state$.next('reconnecting');
           this.backendStatus.setWaking();
@@ -105,7 +151,11 @@ export class PriceStreamService {
       return () => {
         stopped = true;
         clearTimeout(reconnectTimer);
-        ws?.close();
+        clearTimeout(openTimer);
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+        sse?.close();
       };
     });
   }

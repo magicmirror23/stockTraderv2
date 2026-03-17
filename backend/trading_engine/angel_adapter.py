@@ -1,28 +1,25 @@
-"""Angel One SmartAPI adapter – paper + live implementations.
-
-This adapter is *pluggable*: the ``BrokerAdapter`` protocol defines the
-interface.  Set ``PAPER_MODE=false`` in ``.env`` and provide AngelOne
-credentials to trade live via SmartAPI.
-
-Credentials (set in ``.env``):
-    ANGEL_API_KEY      – SmartAPI key from https://smartapi.angelone.in/
-    ANGEL_CLIENT_ID    – Your Angel One client ID
-    ANGEL_MPIN         – 4-digit MPIN for login
-    ANGEL_TOTP_SECRET  – TOTP secret for 2FA
-"""
+"""Angel One SmartAPI adapter – paper + live implementations."""
 
 from __future__ import annotations
 
 import logging
 import time
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
 from backend.core.config import settings
+from backend.trading_engine.account_state import (
+    AccountState,
+    HoldingState,
+    OrderState,
+    holding_from_mapping,
+    instrument_key,
+    order_from_mapping,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +30,11 @@ ANGEL_MPIN = settings.ANGEL_CLIENT_PIN or ""
 ANGEL_TOTP_SECRET = settings.ANGEL_TOTP_SECRET or ""
 
 
-# ---------------------------------------------------------------------------
-# Protocol (interface)
-# ---------------------------------------------------------------------------
-
 class BrokerAdapter(Protocol):
     """Pluggable broker adapter interface."""
+
+    def get_account_type(self) -> str:
+        ...
 
     def place_order(self, order_intent: dict) -> dict:
         ...
@@ -53,16 +49,20 @@ class BrokerAdapter(Protocol):
         ...
 
     def get_balance(self) -> dict:
-        """Return available balance / margin.
-
-        Returns dict with at least: available_cash, used_margin, total_equity.
-        """
         ...
 
+    def get_positions(self) -> list[dict]:
+        ...
 
-# ---------------------------------------------------------------------------
-# Paper-mode adapter
-# ---------------------------------------------------------------------------
+    def get_holdings(self) -> list[dict]:
+        ...
+
+    def get_open_orders(self) -> list[dict]:
+        ...
+
+    def fetch_account_state(self) -> AccountState:
+        ...
+
 
 @dataclass
 class SimulatedFill:
@@ -75,26 +75,18 @@ class SimulatedFill:
     latency_ms: float
     status: str
     timestamp: str
-    # Option fields
     option_type: str | None = None
     strike: float | None = None
     expiry: str | None = None
     strategy: str | None = None
+    detail: str | None = None
 
 
-# Default demo capital (can be overridden via PAPER_BALANCE env var)
 _DEFAULT_PAPER_BALANCE = 100000.0
 
 
 class AngelPaperAdapter:
-    """Simulates Angel One SmartAPI in paper mode.
-
-    Supports retries and rate-limit backoff.  All fills are simulated
-    with configurable slippage.  Option orders have higher slippage.
-
-    The adapter tracks a virtual cash balance.  Set ``PAPER_BALANCE`` in
-    ``.env`` to change the starting amount (default ₹1,00,000).
-    """
+    """Simulates Angel One SmartAPI in paper mode."""
 
     def __init__(
         self,
@@ -110,30 +102,20 @@ class AngelPaperAdapter:
         self.max_retries = max_retries
         self.rate_limit_delay = rate_limit_delay
         self.simulated_latency_ms = simulated_latency_ms
-        self._orders: dict[str, dict] = {}
-        # Balance tracking
+        self._orders: dict[str, dict[str, Any]] = {}
+        self._positions: dict[str, dict[str, Any]] = {}
         self._initial_balance = initial_balance or _DEFAULT_PAPER_BALANCE
         self._available_cash: float = self._initial_balance
-        self._used_margin: float = 0.0  # value locked in open positions
+        self._used_margin: float = 0.0
+
+    def get_account_type(self) -> str:
+        return "paper"
 
     def place_order(self, order_intent: dict) -> dict:
-        """Place a simulated order.
-
-        Parameters
-        ----------
-        order_intent : dict
-            Must contain: ticker, side, quantity, order_type.
-            Optional: limit_price, current_price, option_type, strike, expiry, strategy.
-
-        Returns
-        -------
-        dict
-            Simulated fill response.
-        """
         for attempt in range(1, self.max_retries + 1):
             try:
                 return self._execute(order_intent)
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover - defensive logging
                 logger.warning(
                     "Order attempt %d/%d failed: %s", attempt, self.max_retries, exc
                 )
@@ -142,64 +124,170 @@ class AngelPaperAdapter:
         return {"status": "failed", "detail": "Max retries exceeded"}
 
     def cancel_order(self, order_id: str) -> dict:
-        """Cancel a simulated order."""
         if order_id in self._orders:
             self._orders[order_id]["status"] = "cancelled"
             return {"order_id": order_id, "status": "cancelled"}
         return {"order_id": order_id, "status": "not_found"}
 
     def get_order_status(self, order_id: str) -> dict:
-        """Retrieve status of a previously placed order."""
         if order_id in self._orders:
             return self._orders[order_id]
         return {"order_id": order_id, "status": "not_found"}
 
     def get_ltp(self, ticker: str) -> dict:
-        """Return simulated LTP based on last filled price for this ticker."""
         last_price = 100.0
+        ticker_upper = str(ticker).upper()
         for order in reversed(list(self._orders.values())):
-            if order.get("ticker") == ticker and order.get("status") == "filled":
+            if order.get("ticker") == ticker_upper and order.get("status") == "filled":
                 last_price = order["filled_price"]
                 break
         rng = np.random.default_rng()
         jitter = rng.normal(0, 0.002)
         ltp = round(last_price * (1 + jitter), 2)
-        return {"ltp": ltp, "ticker": ticker}
+        return {"ltp": ltp, "ticker": ticker_upper}
 
     def get_balance(self) -> dict:
-        """Return current paper-mode balance."""
         return {
             "available_cash": round(self._available_cash, 2),
+            "buying_power": round(self._available_cash, 2),
             "used_margin": round(self._used_margin, 2),
             "total_equity": round(self._available_cash + self._used_margin, 2),
         }
 
+    def get_positions(self) -> list[dict]:
+        return [
+            {
+                "ticker": position["ticker"],
+                "quantity": position["quantity"],
+                "average_price": position["avg_price"],
+                "option_type": position.get("option_type"),
+                "strike": position.get("strike"),
+                "expiry": position.get("expiry"),
+            }
+            for position in self._positions.values()
+            if position["quantity"] > 0
+        ]
+
+    def get_holdings(self) -> list[dict]:
+        return self.get_positions()
+
+    def get_open_orders(self) -> list[dict]:
+        return [
+            order
+            for order in self._orders.values()
+            if str(order.get("status") or "").lower()
+            not in {"filled", "cancelled", "canceled", "rejected", "failed"}
+        ]
+
+    def fetch_account_state(self) -> AccountState:
+        holdings = {
+            key: HoldingState(
+                ticker=position["ticker"],
+                quantity=position["quantity"],
+                average_price=position["avg_price"],
+                option_type=position.get("option_type"),
+                strike=position.get("strike"),
+                expiry=position.get("expiry"),
+                source="paper_positions",
+            )
+            for key, position in self._positions.items()
+            if position["quantity"] > 0
+        }
+        open_orders = [
+            OrderState(
+                order_id=str(order.get("order_id") or ""),
+                ticker=str(order.get("ticker") or ""),
+                side=str(order.get("side") or ""),
+                quantity=int(order.get("quantity") or 0),
+                status=str(order.get("status") or "open"),
+                pending_quantity=int(order.get("pending_quantity") or order.get("quantity") or 0),
+                average_price=float(order.get("filled_price") or order.get("price") or 0.0),
+                option_type=order.get("option_type"),
+                strike=order.get("strike"),
+                expiry=order.get("expiry"),
+                source="paper_orders",
+            )
+            for order in self.get_open_orders()
+        ]
+        balance = self.get_balance()
+        return AccountState(
+            account_type="paper",
+            available_cash=float(balance["available_cash"]),
+            buying_power=float(balance["buying_power"]),
+            total_equity=float(balance["total_equity"]),
+            holdings=holdings,
+            open_positions={},
+            open_orders=open_orders,
+            raw={"orders": list(self._orders.values())},
+        )
+
+    def _position_key(self, intent: dict) -> str:
+        return instrument_key(
+            intent["ticker"],
+            intent.get("option_type"),
+            intent.get("strike"),
+            intent.get("expiry"),
+        )
+
+    def _recompute_used_margin(self) -> None:
+        self._used_margin = round(
+            sum(position["quantity"] * position["avg_price"] for position in self._positions.values()),
+            2,
+        )
+
     def _execute(self, intent: dict) -> dict:
         order_id = str(uuid.uuid4())
-        base_price = intent.get("current_price", 100.0)
+        ticker = str(intent["ticker"]).upper()
+        base_price = float(intent.get("current_price", 100.0))
+        quantity = int(intent["quantity"])
+        side = str(intent["side"]).lower()
         is_option = intent.get("option_type") is not None
-
-        # Options have wider slippage
         slip_pct = self.option_slippage_pct if is_option else self.slippage_pct
 
-        # Add small random variation to slippage
         rng = np.random.default_rng()
-        jitter = rng.uniform(0.5, 1.5)
-        effective_slip = slip_pct * jitter
-
-        if intent["side"] == "buy":
-            filled_price = round(base_price * (1 + effective_slip), 2)
-        else:
-            filled_price = round(base_price * (1 - effective_slip), 2)
-
-        # Simulated latency with jitter
+        effective_slip = slip_pct * rng.uniform(0.5, 1.5)
+        filled_price = round(
+            base_price * (1 + effective_slip if side == "buy" else 1 - effective_slip),
+            2,
+        )
         latency = round(self.simulated_latency_ms * rng.uniform(0.8, 1.5), 2)
+        key = self._position_key(intent)
+        order_value = filled_price * quantity
+
+        if side == "buy" and order_value > self._available_cash:
+            rejected = {
+                "order_id": order_id,
+                "ticker": ticker,
+                "side": side,
+                "quantity": quantity,
+                "status": "rejected",
+                "detail": f"Insufficient cash: need {order_value:.2f}, have {self._available_cash:.2f}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            self._orders[order_id] = rejected
+            return rejected
+
+        if side == "sell":
+            position = self._positions.get(key)
+            held_qty = int(position["quantity"]) if position else 0
+            if held_qty < quantity:
+                rejected = {
+                    "order_id": order_id,
+                    "ticker": ticker,
+                    "side": side,
+                    "quantity": quantity,
+                    "status": "rejected",
+                    "detail": f"Insufficient holdings: requested {quantity}, held {held_qty}",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                self._orders[order_id] = rejected
+                return rejected
 
         fill = SimulatedFill(
             order_id=order_id,
-            ticker=intent["ticker"],
-            side=intent["side"],
-            quantity=intent["quantity"],
+            ticker=ticker,
+            side=side,
+            quantity=quantity,
             filled_price=filled_price,
             slippage=round(abs(filled_price - base_price), 4),
             latency_ms=latency,
@@ -210,45 +298,49 @@ class AngelPaperAdapter:
             expiry=intent.get("expiry"),
             strategy=intent.get("strategy"),
         )
-
         result = asdict(fill)
         self._orders[order_id] = result
 
-        # Update balance: buy → lock cash, sell → release cash
-        order_value = filled_price * intent["quantity"]
-        if intent["side"] == "buy":
+        if side == "buy":
             self._available_cash -= order_value
-            self._used_margin += order_value
+            position = self._positions.get(key)
+            if position:
+                total_qty = position["quantity"] + quantity
+                weighted_cost = (position["avg_price"] * position["quantity"]) + (filled_price * quantity)
+                position["avg_price"] = weighted_cost / total_qty if total_qty else position["avg_price"]
+                position["quantity"] = total_qty
+            else:
+                self._positions[key] = {
+                    "ticker": ticker,
+                    "quantity": quantity,
+                    "avg_price": filled_price,
+                    "option_type": intent.get("option_type"),
+                    "strike": intent.get("strike"),
+                    "expiry": intent.get("expiry"),
+                }
         else:
+            position = self._positions[key]
+            position["quantity"] -= quantity
             self._available_cash += order_value
-            self._used_margin = max(0.0, self._used_margin - order_value)
+            if position["quantity"] <= 0:
+                del self._positions[key]
 
+        self._recompute_used_margin()
         logger.info(
             "Simulated fill: %s %s %d @ %.2f (slip=%.4f, latency=%.1fms, bal=%.2f)",
-            intent["side"], intent["ticker"], intent["quantity"],
-            filled_price, fill.slippage, latency, self._available_cash,
+            side,
+            ticker,
+            quantity,
+            filled_price,
+            fill.slippage,
+            latency,
+            self._available_cash,
         )
         return result
 
 
-# ---------------------------------------------------------------------------
-# Live-mode adapter (requires smartapi-python)
-# ---------------------------------------------------------------------------
-
 class AngelLiveAdapter:
-    """Real Angel One SmartAPI adapter for live trading.
-
-    Requires the ``smartapi-python`` package::
-
-        pip install smartapi-python
-
-    Set these environment variables in ``.env``::
-
-        ANGEL_API_KEY=<your-api-key>
-        ANGEL_CLIENT_ID=<your-client-id>
-        ANGEL_MPIN=<your-4-digit-mpin>
-        ANGEL_TOTP_SECRET=<your-totp-secret>
-    """
+    """Real Angel One SmartAPI adapter for live trading."""
 
     def __init__(self) -> None:
         if not all([ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_MPIN, ANGEL_TOTP_SECRET]):
@@ -259,8 +351,10 @@ class AngelLiveAdapter:
         self._smart_api = None
         self._connected = False
 
+    def get_account_type(self) -> str:
+        return "real"
+
     def _ensure_connected(self) -> None:
-        """Lazily connect on first use so bad credentials don't crash startup."""
         if self._connected:
             return
         try:
@@ -285,7 +379,7 @@ class AngelLiveAdapter:
             "variety": "NORMAL",
             "tradingsymbol": order_intent["ticker"],
             "symboltoken": order_intent.get("symbol_token", ""),
-            "transactiontype": order_intent["side"].upper(),
+            "transactiontype": str(order_intent["side"]).upper(),
             "exchange": order_intent.get("exchange", "NSE"),
             "ordertype": order_intent.get("order_type", "MARKET").upper(),
             "producttype": order_intent.get("product_type", "INTRADAY"),
@@ -296,12 +390,15 @@ class AngelLiveAdapter:
             params["price"] = str(order_intent["limit_price"])
 
         result = self._smart_api.placeOrder(params)
+        order_id = result if isinstance(result, str) else str(result)
         logger.info("AngelOne order placed: %s", result)
+        current_price = float(order_intent.get("current_price") or order_intent.get("limit_price") or 0.0)
         return {
-            "order_id": result if isinstance(result, str) else str(result),
+            "order_id": order_id,
             "ticker": order_intent["ticker"],
             "side": order_intent["side"],
             "quantity": order_intent["quantity"],
+            "filled_price": current_price,
             "status": "placed",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -316,44 +413,101 @@ class AngelLiveAdapter:
         order_book = self._smart_api.orderBook()
         if order_book and order_book.get("data"):
             for order in order_book["data"]:
-                if order.get("orderid") == order_id:
+                if str(order.get("orderid")) == str(order_id):
                     return order
         return {"order_id": order_id, "status": "not_found"}
 
     def get_ltp(self, ticker: str) -> dict:
-        """Fetch last traded price from Angel One."""
         self._ensure_connected()
-        exchange = "NSE"
         try:
-            data = self._smart_api.ltpData(exchange, ticker, "")
+            data = self._smart_api.ltpData("NSE", ticker, "")
             if data and data.get("data"):
-                return {
-                    "ltp": float(data["data"].get("ltp", 0)),
-                    "ticker": ticker,
-                }
+                return {"ltp": float(data["data"].get("ltp", 0)), "ticker": ticker}
         except Exception as exc:
             logger.warning("LTP fetch failed for %s: %s", ticker, exc)
-        return {"ltp": 0, "ticker": ticker}
+        return {"ltp": 0.0, "ticker": ticker}
 
     def get_balance(self) -> dict:
-        """Fetch available cash, margins, and equity from Angel One."""
         self._ensure_connected()
         try:
             rms = self._smart_api.rmsLimit()
             data = rms.get("data", {}) if rms else {}
+            available_cash = float(data.get("availablecash", 0) or 0)
+            buying_power = float(data.get("availableintradaypayin", 0) or available_cash)
+            total_equity = float(data.get("net", 0) or available_cash)
             return {
-                "available_cash": float(data.get("availablecash", 0)),
-                "used_margin": float(data.get("utiliseddebits", 0)),
-                "total_equity": float(data.get("net", 0)),
+                "available_cash": available_cash,
+                "buying_power": buying_power or available_cash,
+                "used_margin": float(data.get("utiliseddebits", 0) or 0),
+                "total_equity": total_equity or available_cash,
             }
         except Exception as exc:
             logger.warning("Balance fetch failed: %s", exc)
-            return {"available_cash": 0, "used_margin": 0, "total_equity": 0}
+            return {"available_cash": 0.0, "buying_power": 0.0, "used_margin": 0.0, "total_equity": 0.0}
 
+    def get_positions(self) -> list[dict]:
+        self._ensure_connected()
+        try:
+            response = self._smart_api.position()
+            data = response.get("data", []) if response else []
+            return list(data or [])
+        except Exception as exc:
+            logger.warning("Position fetch failed: %s", exc)
+            return []
 
-# ---------------------------------------------------------------------------
-# Factory – auto-selects adapter based on PAPER_MODE
-# ---------------------------------------------------------------------------
+    def get_holdings(self) -> list[dict]:
+        self._ensure_connected()
+        try:
+            response = self._smart_api.holding()
+            data = response.get("data", []) if response else []
+            return list(data or [])
+        except Exception as exc:
+            logger.warning("Holdings fetch failed: %s", exc)
+            return []
+
+    def get_open_orders(self) -> list[dict]:
+        self._ensure_connected()
+        try:
+            response = self._smart_api.orderBook()
+            data = response.get("data", []) if response else []
+            open_orders = []
+            for order in data or []:
+                status = str(order.get("orderstatus") or order.get("status") or "").lower()
+                if status not in {"complete", "filled", "cancelled", "rejected"}:
+                    open_orders.append(order)
+            return open_orders
+        except Exception as exc:
+            logger.warning("Open order fetch failed: %s", exc)
+            return []
+
+    def fetch_account_state(self) -> AccountState:
+        balance = self.get_balance()
+        holdings = {
+            position.key: position
+            for row in self.get_holdings()
+            if (position := holding_from_mapping(row, source="broker_holdings")) is not None
+        }
+        open_positions = {
+            position.key: position
+            for row in self.get_positions()
+            if (position := holding_from_mapping(row, source="broker_positions")) is not None
+        }
+        open_orders = [
+            order
+            for row in self.get_open_orders()
+            if (order := order_from_mapping(row, source="broker_orders")) is not None
+        ]
+        return AccountState(
+            account_type="real",
+            available_cash=float(balance.get("available_cash", 0.0)),
+            buying_power=float(balance.get("buying_power", 0.0) or balance.get("available_cash", 0.0)),
+            total_equity=float(balance.get("total_equity", 0.0) or balance.get("available_cash", 0.0)),
+            holdings=holdings,
+            open_positions=open_positions,
+            open_orders=open_orders,
+            raw={"balance": balance},
+        )
+
 
 def get_adapter() -> BrokerAdapter:
     """Return the appropriate broker adapter based on PAPER_MODE env var."""
