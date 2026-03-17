@@ -6,8 +6,9 @@ then scores them with a finance- and macro-aware keyword lexicon.
 
 from __future__ import annotations
 
-import logging
 import re
+import logging
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -36,6 +37,16 @@ _NEGATIVE = {
     "attack", "missile", "hike", "layoff", "bankruptcy", "probe", "fraud",
     "volatility", "uncertainty", "disruption", "embargo", "debt",
 }
+_EVENT_POSITIVE = {
+    "earnings", "results", "profit", "dividend", "bonus", "split", "order",
+    "contract", "approval", "launch", "capex", "investment", "acquisition",
+    "merger", "partnership", "expansion", "guidance", "upgrade",
+}
+_EVENT_NEGATIVE = {
+    "downgrade", "fraud", "probe", "penalty", "lawsuit", "delay", "recall",
+    "default", "bankruptcy", "slump", "guidance", "warning", "resignation",
+    "fire", "accident", "strike", "outage", "miss", "weak",
+}
 
 
 @dataclass
@@ -45,12 +56,15 @@ class HeadlineRecord:
     headline: str
     topic: str
     sentiment_score: float
+    event_score: float
 
 
 class NewsConnector:
     """Fetches and scores historical news headlines for market topics."""
 
     BASE_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+    MAX_RETRIES = 2
+    BASE_BACKOFF_SECONDS = 1.25
 
     def __init__(self, session: requests.Session | None = None) -> None:
         self._session = session or requests.Session()
@@ -63,6 +77,18 @@ class NewsConnector:
         word_set = set(words)
         pos = len(word_set & _POSITIVE)
         neg = len(word_set & _NEGATIVE)
+        if pos == 0 and neg == 0:
+            return 0.0
+        return (pos - neg) / max(pos + neg, 1)
+
+    @staticmethod
+    def _event_score(text: str) -> float:
+        words = re.findall(r"[a-z]+", text.lower())
+        if not words:
+            return 0.0
+        word_set = set(words)
+        pos = len(word_set & _EVENT_POSITIVE)
+        neg = len(word_set & _EVENT_NEGATIVE)
         if pos == 0 and neg == 0:
             return 0.0
         return (pos - neg) / max(pos + neg, 1)
@@ -106,9 +132,39 @@ class NewsConnector:
         }
         url = f"{self.BASE_URL}?{urlencode(params)}"
         logger.info("Fetching news topic %s from %s to %s", topic, start_dt, end_dt)
-        response = self._session.get(url, timeout=30)
-        response.raise_for_status()
-        return self._parse_rss(topic, response.text)
+        last_error: Exception | None = None
+        for attempt in range(self.MAX_RETRIES + 1):
+            response = self._session.get(url, timeout=30)
+            if response.status_code != 429:
+                response.raise_for_status()
+                return self._parse_rss(topic, response.text)
+
+            retry_after_header = response.headers.get("Retry-After", "").strip()
+            try:
+                retry_after = float(retry_after_header)
+            except ValueError:
+                retry_after = self.BASE_BACKOFF_SECONDS * (attempt + 1)
+
+            last_error = requests.HTTPError(
+                f"429 Client Error: Too Many Requests for url: {response.url}",
+                response=response,
+            )
+            if attempt >= self.MAX_RETRIES:
+                break
+
+            delay = max(retry_after, self.BASE_BACKOFF_SECONDS * (attempt + 1))
+            logger.warning(
+                "News feed rate-limited for %s on attempt %d/%d; retrying in %.2fs",
+                topic,
+                attempt + 1,
+                self.MAX_RETRIES + 1,
+                delay,
+            )
+            time.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"News fetch failed for {topic}")
 
     def fetch_to_csv(
         self,
@@ -145,10 +201,13 @@ class NewsConnector:
             "date",
             "avg_sentiment",
             "headline_count",
+            "avg_event_score",
             "sentiment_7d",
             "sentiment_30d",
             "headline_count_7d",
             "headline_count_30d",
+            "event_score_7d",
+            "event_score_30d",
         ]
         if not headlines and start_date is None and end_date is None:
             return pd.DataFrame(columns=columns)
@@ -169,26 +228,41 @@ class NewsConnector:
                 {
                     "date": pd.Timestamp(h.timestamp.date()),
                     "sentiment": h.sentiment_score,
+                    "event_score": h.event_score,
                 }
                 for h in headlines
             ]
             df = pd.DataFrame(records)
             daily = (
                 df.groupby("date")
-                .agg(avg_sentiment=("sentiment", "mean"), headline_count=("sentiment", "count"))
+                .agg(
+                    avg_sentiment=("sentiment", "mean"),
+                    headline_count=("sentiment", "count"),
+                    avg_event_score=("event_score", "mean"),
+                )
                 .reset_index()
                 .sort_values("date")
             )
             daily = daily.set_index("date").reindex(full_index).rename_axis("date").reset_index()
         else:
-            daily = pd.DataFrame({"date": full_index, "avg_sentiment": 0.0, "headline_count": 0})
+            daily = pd.DataFrame(
+                {
+                    "date": full_index,
+                    "avg_sentiment": 0.0,
+                    "headline_count": 0,
+                    "avg_event_score": 0.0,
+                }
+            )
 
         daily["avg_sentiment"] = daily["avg_sentiment"].fillna(0.0)
         daily["headline_count"] = daily["headline_count"].fillna(0)
+        daily["avg_event_score"] = daily["avg_event_score"].fillna(0.0)
         daily["sentiment_7d"] = daily["avg_sentiment"].rolling(window=7, min_periods=1).mean()
         daily["sentiment_30d"] = daily["avg_sentiment"].rolling(window=long_window, min_periods=1).mean()
         daily["headline_count_7d"] = daily["headline_count"].rolling(window=7, min_periods=1).sum()
         daily["headline_count_30d"] = daily["headline_count"].rolling(window=long_window, min_periods=1).sum()
+        daily["event_score_7d"] = daily["avg_event_score"].rolling(window=7, min_periods=1).mean()
+        daily["event_score_30d"] = daily["avg_event_score"].rolling(window=long_window, min_periods=1).mean()
         return daily
 
     def score_text(self, text: str) -> float:
@@ -198,8 +272,16 @@ class NewsConnector:
         try:
             root = ElementTree.fromstring(xml_text)
         except ElementTree.ParseError as exc:
-            logger.warning("Failed to parse news feed for %s: %s", topic, exc)
-            return []
+            sanitized = self._sanitize_xml(xml_text)
+            if sanitized != xml_text:
+                try:
+                    root = ElementTree.fromstring(sanitized)
+                except ElementTree.ParseError:
+                    logger.warning("Failed to parse news feed for %s: %s", topic, exc)
+                    return []
+            else:
+                logger.warning("Failed to parse news feed for %s: %s", topic, exc)
+                return []
 
         records: list[HeadlineRecord] = []
         for item in root.findall(".//item"):
@@ -225,9 +307,20 @@ class NewsConnector:
                     headline=title,
                     topic=topic,
                     sentiment_score=self._keyword_sentiment(title),
+                    event_score=self._event_score(title),
                 )
             )
         return records
+
+    @staticmethod
+    def _sanitize_xml(xml_text: str) -> str:
+        # GDELT occasionally returns malformed RSS with stray control chars or
+        # unescaped ampersands in titles/descriptions. Clean those first so we
+        # can still recover the usable portion of the feed.
+        sanitized = xml_text.lstrip("\ufeff")
+        sanitized = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", sanitized)
+        sanitized = re.sub(r"&(?!#?\w+;)", "&amp;", sanitized)
+        return sanitized
 
 
 def topic_queries() -> dict[str, str]:
@@ -253,6 +346,19 @@ def topic_feature_columns() -> list[str]:
             ]
         )
     return columns
+
+
+def company_feature_columns() -> list[str]:
+    return [
+        "company_sentiment_7d",
+        "company_sentiment_30d",
+        "company_headline_count_7d",
+        "company_headline_count_30d",
+        "company_event_score_7d",
+        "company_event_score_30d",
+        "company_news_attention_shock",
+        "company_event_intensity",
+    ]
 
 
 def list_topic_files(directory: str | Path) -> Iterable[Path]:

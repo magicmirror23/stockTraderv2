@@ -15,7 +15,7 @@ import { NotificationService } from '../services/notification.service';
       <h1>Admin & Monitoring</h1>
 
       <!-- Auth -->
-      <div class="card mb-2" *ngIf="!auth.isAuthenticated">
+      <div class="card mb-2" *ngIf="!auth.isAuthenticated" [attr.title]="sectionHelp.auth">
         <div class="flex gap-1 items-center">
           <span class="text-muted text-sm">Admin token required for retrain/drift:</span>
           <input type="password" [(ngModel)]="tokenInput" placeholder="Bearer token" />
@@ -58,7 +58,7 @@ import { NotificationService } from '../services/notification.service';
             </div>
           </div>
 
-          <div class="card mb-2">
+          <div class="card mb-2" [attr.title]="sectionHelp.actions">
             <h3>Actions</h3>
             <div class="flex gap-2">
               <button class="btn-primary" (click)="reloadModel()" [disabled]="reloading">
@@ -89,7 +89,7 @@ import { NotificationService } from '../services/notification.service';
             </div>
           </div>
 
-          <div class="card mb-2">
+          <div class="card mb-2" [attr.title]="sectionHelp.trainingLog">
             <div class="flex items-center justify-between">
               <h3>Training Log</h3>
               <button (click)="loadRetrainLogs(true)" [disabled]="!auth.isAuthenticated">Refresh Log</button>
@@ -151,7 +151,7 @@ import { NotificationService } from '../services/notification.service';
             {{ driftChecking ? 'Checking...' : 'Run Drift Check' }}
           </button>
         </div>
-        <div *ngIf="!driftLoading && !drift" class="card">
+        <div *ngIf="!driftLoading && !drift" class="card" [attr.title]="sectionHelp.drift">
           <p class="text-muted">No drift data available.</p>
           <button class="btn-primary" (click)="runDriftCheck()" [disabled]="driftChecking || !auth.isAuthenticated">Run First Check</button>
         </div>
@@ -161,7 +161,7 @@ import { NotificationService } from '../services/notification.service';
       <div *ngIf="activeTab === 'registry'">
         <div *ngIf="versionsLoading" class="loading-container"><div class="spinner"></div> Loading versions...</div>
         <div *ngIf="!versionsLoading">
-          <div class="card">
+          <div class="card" [attr.title]="sectionHelp.registry">
             <h3>Model Versions</h3>
             <table *ngIf="versions.length > 0">
               <thead>
@@ -259,6 +259,13 @@ import { NotificationService } from '../services/notification.service';
   `]
 })
 export class AdminComponent implements OnInit, OnDestroy {
+  readonly sectionHelp = {
+    auth: 'What: admin authentication area. How: set the admin bearer token here before retraining, drift checks, or reading protected retrain logs.',
+    actions: 'What: model control panel. How: reload the active model, trigger retraining, and monitor progress from this section.',
+    trainingLog: 'What: live backend retrain log viewer. How: use it to see data refresh, feature building, training stages, and any retrain errors.',
+    drift: 'What: model health and drift monitoring. How: run checks here to detect feature drift, latency issues, and rising error rates.',
+    registry: 'What: saved model registry. How: compare versions, timestamps, and historical accuracy before promoting a new model.',
+  };
   tokenInput = '';
   activeTab: 'model' | 'drift' | 'registry' | 'canary' = 'model';
 

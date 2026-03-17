@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.core.config import settings
+from backend.prediction_engine.data_pipeline.company_profiles import (
+    company_news_query_for_ticker,
+    company_news_tickers,
+)
 from backend.prediction_engine.data_pipeline.connector_news import NewsConnector, topic_queries
 
 
 logger = logging.getLogger(__name__)
+COMPANY_NEWS_REQUEST_DELAY_SECONDS = 0.75
 
 
 @dataclass
@@ -22,9 +28,15 @@ class NewsRefreshReport:
     refreshed: list[str]
     reused: list[str]
     failed: dict[str, str]
+    company_tickers: list[str]
+    company_downloaded: list[str]
+    company_refreshed: list[str]
+    company_reused: list[str]
+    company_failed: dict[str, str]
     start_date: str
     end_date: str
     output_dir: str
+    company_output_dir: str
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -46,24 +58,32 @@ class NewsContextManager:
                     cls._instance._last_checked_at = None
         return cls._instance
 
-    def ensure_recent(self, force: bool = False) -> NewsRefreshReport | None:
+    def ensure_recent(
+        self,
+        force: bool = False,
+        tickers: list[str] | None = None,
+    ) -> NewsRefreshReport | None:
         if not settings.ENABLE_NEWS_FEATURES:
             return None
 
         with self._lock:
             now = datetime.now(timezone.utc)
+            requested_tickers = set(company_news_tickers(tickers or []))
+            cached_tickers = set(getattr(self._last_report, "company_tickers", []) if self._last_report else [])
             if (
                 not force
                 and self._last_checked_at is not None
                 and now - self._last_checked_at < timedelta(minutes=15)
                 and self._last_report is not None
+                and requested_tickers.issubset(cached_tickers)
             ):
                 return self._last_report
 
             report = refresh_news_context(
-                output_dir=settings.news_data_path / "topics",
+                output_dir=settings.news_data_path,
                 lookback_days=settings.NEWS_CONTEXT_LOOKBACK_DAYS,
                 max_age_hours=settings.NEWS_DATA_MAX_AGE_HOURS,
+                tickers=sorted(requested_tickers),
             )
             self._last_checked_at = now
             self._last_report = report
@@ -74,11 +94,16 @@ def refresh_news_context(
     output_dir: str | Path,
     lookback_days: int,
     max_age_hours: int,
+    tickers: list[str] | None = None,
 ) -> NewsRefreshReport:
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_root = Path(output_dir)
+    topic_output_dir = output_root / "topics"
+    company_output_dir = output_root / "companies"
+    topic_output_dir.mkdir(parents=True, exist_ok=True)
+    company_output_dir.mkdir(parents=True, exist_ok=True)
     connector = NewsConnector()
     topics = topic_queries()
+    company_ticker_list = company_news_tickers(tickers or [])
 
     end_dt = datetime.now(timezone.utc)
     start_dt = end_dt - timedelta(days=lookback_days)
@@ -88,13 +113,19 @@ def refresh_news_context(
         refreshed=[],
         reused=[],
         failed={},
+        company_tickers=company_ticker_list,
+        company_downloaded=[],
+        company_refreshed=[],
+        company_reused=[],
+        company_failed={},
         start_date=start_dt.date().isoformat(),
         end_date=end_dt.date().isoformat(),
-        output_dir=str(output_dir),
+        output_dir=str(topic_output_dir),
+        company_output_dir=str(company_output_dir),
     )
 
     for topic, query in topics.items():
-        path = output_dir / f"{topic}.csv"
+        path = topic_output_dir / f"{topic}.csv"
         existed_before = path.exists()
         if path.exists():
             age = end_dt - datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
@@ -103,7 +134,7 @@ def refresh_news_context(
                 continue
 
         try:
-            connector.fetch_to_csv(topic=topic, query=query, start=start_dt, end=end_dt, output_dir=output_dir)
+            connector.fetch_to_csv(topic=topic, query=query, start=start_dt, end=end_dt, output_dir=topic_output_dir)
             if existed_before:
                 report.refreshed.append(topic)
             else:
@@ -111,6 +142,34 @@ def refresh_news_context(
         except Exception as exc:
             report.failed[topic] = str(exc)
             logger.warning("Failed to refresh news topic %s: %s", topic, exc)
+
+    for ticker in company_ticker_list:
+        path = company_output_dir / f"{ticker}.csv"
+        existed_before = path.exists()
+        if path.exists():
+            age = end_dt - datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            if age <= timedelta(hours=max_age_hours):
+                report.company_reused.append(ticker)
+                continue
+
+        try:
+            connector.fetch_to_csv(
+                topic=ticker,
+                query=company_news_query_for_ticker(ticker),
+                start=start_dt,
+                end=end_dt,
+                output_dir=company_output_dir,
+            )
+            if existed_before:
+                report.company_refreshed.append(ticker)
+            else:
+                report.company_downloaded.append(ticker)
+        except Exception as exc:
+            report.company_failed[ticker] = str(exc)
+            logger.warning("Failed to refresh company news for %s: %s", ticker, exc)
+        finally:
+            if company_ticker_list:
+                time.sleep(COMPANY_NEWS_REQUEST_DELAY_SECONDS)
 
     return report
 

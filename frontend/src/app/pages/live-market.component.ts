@@ -32,7 +32,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
       </div>
 
       <!-- Market Status Banner -->
-      <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')">
+      <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')" [attr.title]="sectionHelp.marketStatus">
         <div class="flex justify-between items-center">
           <div class="flex items-center gap-1">
             <span class="market-dot" [ngClass]="{'dot-open': market?.phase === 'open', 'dot-pre': market?.phase === 'pre_open', 'dot-closed': market?.phase !== 'open' && market?.phase !== 'pre_open'}"></span>
@@ -49,7 +49,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
       </div>
 
       <!-- ── Indices Cards ───────────────────────────────────────── -->
-      <div class="indices-row mb-2">
+      <div class="indices-row mb-2" [attr.title]="sectionHelp.indices">
         <div *ngFor="let idx of indicesData" class="index-card card"
              (click)="selectSymbol(idx.symbol)"
              [ngClass]="{'idx-selected': selectedSymbol === idx.symbol}">
@@ -69,7 +69,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
       </div>
 
       <!-- ── Category Tabs ───────────────────────────────────────── -->
-      <div class="card mb-2 category-bar">
+      <div class="card mb-2 category-bar" [attr.title]="sectionHelp.categories">
         <div class="cat-chips">
           <button class="cat-chip" [ngClass]="{'cat-active': activeCategory === 'All'}"
                   (click)="filterCategory('All')">All ({{ totalSymbols }})</button>
@@ -82,7 +82,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
       </div>
 
       <!-- Controls -->
-      <div class="card mb-2">
+      <div class="card mb-2" [attr.title]="sectionHelp.controls">
         <div class="form-row">
           <div class="form-group" style="flex:2">
             <label>Symbols (comma-separated)</label>
@@ -108,7 +108,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
       <div class="grid-layout">
 
         <!-- Watchlist Table -->
-        <div class="card grid-watchlist">
+        <div class="card grid-watchlist" [attr.title]="sectionHelp.watchlist">
           <h2 style="margin-top:0">Live Watchlist</h2>
           <div class="table-wrap">
             <table>
@@ -162,7 +162,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
         </div>
 
         <!-- Selected Symbol Chart -->
-        <div class="card grid-chart">
+        <div class="card grid-chart" [attr.title]="sectionHelp.chart">
           <div class="flex justify-between items-center" style="margin-bottom:0.5rem">
             <h2 style="margin:0">{{ selectedSymbol || 'Select a symbol' }}</h2>
             <div *ngIf="selectedTick" class="selected-price" [ngClass]="(selectedTick.change ?? 0) >= 0 ? 'up' : 'down'">
@@ -179,7 +179,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
         </div>
 
         <!-- Market Overview: Gainers -->
-        <div class="card grid-gainers">
+        <div class="card grid-gainers" [attr.title]="sectionHelp.gainers">
           <h3 class="panel-title gainer-title">▲ Top Gainers</h3>
           <div *ngFor="let g of overview?.gainers || []" class="overview-row">
             <span class="ov-sym" (click)="selectSymbol(g.symbol)">{{ g.symbol }}</span>
@@ -192,7 +192,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
         </div>
 
         <!-- Market Overview: Losers -->
-        <div class="card grid-losers">
+        <div class="card grid-losers" [attr.title]="sectionHelp.losers">
           <h3 class="panel-title loser-title">▼ Top Losers</h3>
           <div *ngFor="let l of overview?.losers || []" class="overview-row">
             <span class="ov-sym" (click)="selectSymbol(l.symbol)">{{ l.symbol }}</span>
@@ -205,7 +205,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
         </div>
 
         <!-- Volume Leaders -->
-        <div class="card grid-volume">
+        <div class="card grid-volume" [attr.title]="sectionHelp.volume">
           <h3 class="panel-title">ðŸ“Š Volume Leaders</h3>
           <div *ngFor="let v of overview?.volume_leaders || []" class="overview-row">
             <span class="ov-sym" (click)="selectSymbol(v.symbol)">{{ v.symbol }}</span>
@@ -217,7 +217,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
         </div>
 
         <!-- Live Trade Feed -->
-        <div class="card grid-feed">
+        <div class="card grid-feed" [attr.title]="sectionHelp.tradeFeed">
           <h3 class="panel-title">⚡ Live Trade Feed</h3>
           <div class="feed-scroll">
             <div *ngFor="let f of tradeFeed" class="feed-item" [ngClass]="(f.change_pct ?? 0) >= 0 ? 'feed-up' : 'feed-down'">
@@ -233,7 +233,7 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
         </div>
 
         <!-- OHLC Panel for selected symbol -->
-        <div class="card grid-ohlc" *ngIf="selectedTick">
+        <div class="card grid-ohlc" *ngIf="selectedTick" [attr.title]="sectionHelp.ohlc">
           <h3 class="panel-title">ðŸ“‹ {{ selectedSymbol }} Details</h3>
           <div class="ohlc-grid">
             <div class="ohlc-item">
@@ -461,6 +461,19 @@ import { LivePriceChartComponent, PriceTick } from '../components/live-price-cha
   `]
 })
 export class LiveMarketComponent implements OnInit, OnDestroy {
+  readonly sectionHelp = {
+    marketStatus: 'What: current market session status and next timing. How: use it to know whether prices are live, waking, or replay based.',
+    indices: 'What: core index snapshots for NIFTY 50, Bank Nifty, and Sensex. How: click an index card to focus it in the chart area.',
+    categories: 'What: stock group filters for the tracked universe. How: choose a category to quickly load a focused set of symbols into the stream box.',
+    controls: 'What: live-stream controls and symbol selection. How: connect AngelOne, then start the stream or load a snapshot for the chosen symbols.',
+    watchlist: 'What: live price table for the active symbols. How: click any row to inspect it on the chart and in the details panel.',
+    chart: 'What: live chart for the selected symbol. How: select a stock or index from the watchlist or index cards to see recent tick movement.',
+    gainers: 'What: strongest percentage movers from the active stream. How: use this to spot leadership and click a name to inspect it.',
+    losers: 'What: weakest percentage movers from the active stream. How: use this to spot breakdowns or reversal candidates.',
+    volume: 'What: current volume leaders from the active stream. How: use this to find unusual activity and potential breakout names.',
+    tradeFeed: 'What: newest incoming ticks and trade activity. How: watch this for fast tape action when the live stream is active.',
+    ohlc: 'What: detailed quote fields for the selected symbol. How: use it to confirm open, high, low, close, bid, ask, and volume before acting.',
+  };
   private readonly defaultStreamSymbols = [
     'RELIANCE',
     'TCS',

@@ -13,7 +13,7 @@ import { NotificationService } from '../services/notification.service';
       <h1>Backtesting</h1>
 
       <!-- Configuration Form -->
-      <div class="card mb-2">
+      <div class="card mb-2" [attr.title]="sectionHelp.runConfig">
         <h2>Run Backtest</h2>
         <div class="form-row">
           <div class="form-group">
@@ -49,7 +49,7 @@ import { NotificationService } from '../services/notification.service';
       </div>
 
       <!-- Pending Job -->
-      <div *ngIf="jobId && !results" class="card mb-2">
+      <div *ngIf="jobId && !results" class="card mb-2" [attr.title]="sectionHelp.pendingJob">
         <div class="flex items-center gap-2">
           <div class="spinner"></div>
           <div>
@@ -86,7 +86,7 @@ import { NotificationService } from '../services/notification.service';
           </div>
         </div>
 
-        <div class="card mb-2">
+        <div class="card mb-2" [attr.title]="sectionHelp.summary">
           <h3>Performance Summary</h3>
           <div class="grid-3">
             <div><span class="text-muted text-sm">Period:</span> {{ results.start_date }} → {{ results.end_date }}</div>
@@ -96,7 +96,7 @@ import { NotificationService } from '../services/notification.service';
         </div>
 
         <!-- Trade Log -->
-        <div class="card">
+        <div class="card" [attr.title]="sectionHelp.tradeLog">
           <h3>Trade Log</h3>
           <table *ngIf="results.trades.length > 0">
             <thead>
@@ -134,6 +134,12 @@ import { NotificationService } from '../services/notification.service';
   `]
 })
 export class BacktestComponent {
+  readonly sectionHelp = {
+    runConfig: 'What: historical simulation setup. How: choose tickers, strategy, dates, and starting capital to test an idea before paper or live trading.',
+    pendingJob: 'What: backtest job progress card. How: use this to track the submitted job and poll until results are ready.',
+    summary: 'What: backtest performance summary. How: review return, drawdown, Sharpe ratio, and trade count to judge strategy quality.',
+    tradeLog: 'What: historical trade-by-trade output. How: inspect entries, exits, and PnL to understand where the strategy made or lost money.',
+  };
   tickersInput = 'RELIANCE, TCS';
   strategy = 'momentum';
   startDate = '2024-01-01';

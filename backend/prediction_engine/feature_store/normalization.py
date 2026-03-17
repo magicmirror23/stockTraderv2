@@ -5,7 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from backend.prediction_engine.data_pipeline.connector_news import topic_feature_columns
+from backend.prediction_engine.data_pipeline.connector_news import (
+    company_feature_columns,
+    topic_feature_columns,
+)
 
 NEWS_AGGREGATE_FEATURE_COLUMNS = [
     "news_domestic_sentiment_30d",
@@ -21,6 +24,7 @@ BOUNDED_FEATURES = {
     "high_low_ratio", "close_to_ma20", "close_to_ma50", "day_of_week",
     "breadth_up_ratio", "breadth_above_sma50", "news_geopolitical_risk_30d",
     *{col for col in [*topic_feature_columns(), *NEWS_AGGREGATE_FEATURE_COLUMNS] if "sentiment" in col},
+    *{col for col in company_feature_columns() if "sentiment" in col or "event_score" in col},
 }
 
 

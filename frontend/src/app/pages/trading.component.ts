@@ -15,7 +15,7 @@ import { MarketApiService, MarketStatus } from '../services/market-api.service';
       <h1>Trading</h1>
 
       <!-- Market Status Banner -->
-      <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')">
+      <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')" [attr.title]="sectionHelp.marketStatus">
         <div class="flex justify-between items-center">
           <div class="flex items-center gap-1">
             <span class="market-dot" [ngClass]="{'dot-open': market?.phase === 'open', 'dot-pre': market?.phase === 'pre_open', 'dot-closed': market?.phase !== 'open' && market?.phase !== 'pre_open'}"></span>
@@ -32,7 +32,7 @@ import { MarketApiService, MarketStatus } from '../services/market-api.service';
       </div>
 
       <!-- Auth Token -->
-      <div class="card mb-2" *ngIf="!auth.isAuthenticated">
+      <div class="card mb-2" *ngIf="!auth.isAuthenticated" [attr.title]="sectionHelp.auth">
         <h3>Authentication Required</h3>
         <p class="text-muted text-sm">Set your API token to execute trades.</p>
         <div class="flex gap-1">
@@ -40,7 +40,7 @@ import { MarketApiService, MarketStatus } from '../services/market-api.service';
           <button class="btn-primary" (click)="setToken()">Set Token</button>
         </div>
       </div>
-      <div class="card mb-2" *ngIf="auth.isAuthenticated">
+      <div class="card mb-2" *ngIf="auth.isAuthenticated" [attr.title]="sectionHelp.auth">
         <div class="flex justify-between items-center">
           <span class="badge badge-success">Authenticated</span>
           <button class="btn-sm btn-danger" (click)="auth.clearToken()">Logout</button>
@@ -49,7 +49,7 @@ import { MarketApiService, MarketStatus } from '../services/market-api.service';
 
       <div class="flex gap-3" style="align-items: flex-start;">
         <!-- Order Form -->
-        <div class="card" style="flex: 1; min-width: 320px;">
+        <div class="card" style="flex: 1; min-width: 320px;" [attr.title]="sectionHelp.orderForm">
           <h2>Create Trade Intent</h2>
 
           <div *ngIf="!isMarketOpen" class="market-closed-overlay">
@@ -136,7 +136,7 @@ import { MarketApiService, MarketStatus } from '../services/market-api.service';
         <!-- Intents & Executions -->
         <div style="flex: 1.5; min-width: 400px;">
           <!-- Pending Intents -->
-          <div class="card mb-2">
+          <div class="card mb-2" [attr.title]="sectionHelp.pendingIntents">
             <h2>Pending Intents</h2>
             <div *ngIf="intents.length === 0" class="text-muted text-sm">No pending intents.</div>
             <div *ngFor="let intent of intents" class="intent-row">
@@ -162,7 +162,7 @@ import { MarketApiService, MarketStatus } from '../services/market-api.service';
           </div>
 
           <!-- Executions -->
-          <div class="card">
+          <div class="card" [attr.title]="sectionHelp.executions">
             <h2>Executions</h2>
             <div *ngIf="executions.length === 0" class="text-muted text-sm">No executions yet.</div>
             <table *ngIf="executions.length > 0">
@@ -228,6 +228,13 @@ import { MarketApiService, MarketStatus } from '../services/market-api.service';
   `]
 })
 export class TradingComponent implements OnInit, OnDestroy {
+  readonly sectionHelp = {
+    marketStatus: 'What: current NSE market phase and next session timing. How: check this first before placing or executing any trade.',
+    auth: 'What: trading API authentication status. How: set your bearer token here before creating or executing live trade intents.',
+    orderForm: 'What: trade intent builder for equity and options orders. How: enter ticker, side, quantity, and order type, then create an intent before execution.',
+    pendingIntents: 'What: queued trade intents waiting to be executed. How: review estimated cost and execute only the intents you want to send.',
+    executions: 'What: filled trade history for this session. How: use it to confirm fill price, slippage, latency, and execution status.',
+  };
   tokenInput = '';
   orderTab: 'equity' | 'options' = 'equity';
   submitting = false;

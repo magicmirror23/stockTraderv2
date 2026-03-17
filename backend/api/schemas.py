@@ -97,6 +97,39 @@ class PriceTickEvent(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class PredictionThresholdContext(BaseModel):
+    """Decision gates that the live signal had to clear."""
+
+    buy_threshold: Optional[float] = None
+    sell_threshold: Optional[float] = None
+    min_signal_confidence: Optional[float] = None
+    confidence_gap: Optional[float] = None
+    edge_score: Optional[float] = None
+
+
+class PredictionDriver(BaseModel):
+    """Single human-readable model driver used in the explanation panel."""
+
+    feature: str
+    label: str
+    value: float
+    direction: str
+    insight: str
+
+
+class PredictionExplanation(BaseModel):
+    """Human-readable explanation of why the model chose an action."""
+
+    summary: str
+    confidence_band: str
+    market_regime: str
+    news_regime: str
+    decision_gate: str
+    drivers: list[PredictionDriver] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    thresholds: PredictionThresholdContext = Field(default_factory=PredictionThresholdContext)
+
+
 class PredictionEntry(BaseModel):
     """Single prediction record included in every predict response."""
 
@@ -120,6 +153,7 @@ class PredictionEntry(BaseModel):
     shap_top_features: Optional[list[str]] = Field(
         None, description="Top-5 SHAP feature contributions.",
     )
+    explanation: Optional[PredictionExplanation] = None
     timestamp: datetime = Field(
         ..., description="UTC timestamp when prediction was generated."
     )
@@ -397,6 +431,7 @@ class OptionSignal(BaseModel):
     feature_version: Optional[str] = None
     calibration_score: Optional[float] = None
     shap_top_features: Optional[list[str]] = None
+    explanation: Optional[PredictionExplanation] = None
     timestamp: datetime
 
 

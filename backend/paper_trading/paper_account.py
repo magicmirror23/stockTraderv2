@@ -34,6 +34,7 @@ class Position:
 @dataclass
 class PaperAccount:
     account_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    initial_cash: float = 100_000.0
     cash: float = 100_000.0
     positions: dict[str, Position] = field(default_factory=dict)
     trade_log: list[dict[str, Any]] = field(default_factory=list)
@@ -263,7 +264,7 @@ class PaperAccountManager:
         self._accounts: dict[str, PaperAccount] = {}
 
     def create_account(self, initial_cash: float = 100_000.0, label: str | None = None) -> PaperAccount:
-        account = PaperAccount(cash=initial_cash, label=label)
+        account = PaperAccount(initial_cash=initial_cash, cash=initial_cash, label=label)
         self._accounts[account.account_id] = account
         return account
 

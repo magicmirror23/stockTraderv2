@@ -13,7 +13,7 @@ import { NotificationService } from '../services/notification.service';
       <h1>Auto-Trading Bot</h1>
 
       <!-- Market Status Banner -->
-      <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')">
+      <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')" [attr.title]="sectionHelp.marketStatus">
         <div class="flex justify-between items-center">
           <div class="flex items-center gap-1">
             <span class="market-dot" [ngClass]="{'dot-open': market?.phase === 'open', 'dot-pre': market?.phase === 'pre_open', 'dot-closed': market?.phase !== 'open' && market?.phase !== 'pre_open'}"></span>
@@ -31,7 +31,7 @@ import { NotificationService } from '../services/notification.service';
       </div>
 
       <!-- Account Verification -->
-      <div class="card mb-2">
+      <div class="card mb-2" [attr.title]="sectionHelp.accountVerification">
         <div class="flex justify-between items-center mb-1">
           <h2>Account Verification</h2>
           <button class="btn-primary btn-sm" (click)="loadAccount()" [disabled]="accountLoading">
@@ -95,7 +95,7 @@ import { NotificationService } from '../services/notification.service';
 
       <div class="flex gap-3" style="align-items: flex-start;">
         <!-- Bot Controls -->
-        <div class="card" style="flex: 1; min-width: 340px;">
+        <div class="card" style="flex: 1; min-width: 340px;" [attr.title]="sectionHelp.botConfig">
           <h2>Bot Configuration</h2>
 
           <div class="form-group">
@@ -177,7 +177,7 @@ import { NotificationService } from '../services/notification.service';
         <!-- Bot Status & Trades -->
         <div style="flex: 1.5; min-width: 400px;">
           <!-- Active Positions -->
-          <div class="card mb-2">
+          <div class="card mb-2" [attr.title]="sectionHelp.positions">
             <div class="flex justify-between items-center">
               <h2>Active Positions</h2>
               <span class="badge badge-info">{{ positionEntries.length }} open</span>
@@ -201,7 +201,7 @@ import { NotificationService } from '../services/notification.service';
           </div>
 
           <!-- PnL Summary -->
-          <div class="card mb-2">
+          <div class="card mb-2" [attr.title]="sectionHelp.pnlSummary">
             <div class="grid-4">
               <div class="stat-card">
                 <div class="stat-label">Total P&L</div>
@@ -225,7 +225,7 @@ import { NotificationService } from '../services/notification.service';
           </div>
 
           <!-- Trade Log -->
-          <div class="card">
+          <div class="card" [attr.title]="sectionHelp.tradeLog">
             <h2>Trade Log</h2>
             <div *ngIf="!botStatus?.trades_today?.length" class="text-muted text-sm">No trades yet.</div>
             <table *ngIf="botStatus?.trades_today?.length">
@@ -257,7 +257,7 @@ import { NotificationService } from '../services/notification.service';
           </div>
 
           <!-- Errors -->
-          <div class="card mt-2" *ngIf="botStatus?.errors?.length">
+          <div class="card mt-2" *ngIf="botStatus?.errors?.length" [attr.title]="sectionHelp.errors">
             <h2>Bot Errors</h2>
             <div *ngFor="let e of botStatus!.errors" class="text-sm text-danger" style="margin-bottom: 4px;">
               ⚠ {{ e }}
@@ -342,6 +342,15 @@ import { NotificationService } from '../services/notification.service';
   `]
 })
 export class BotPanelComponent implements OnInit, OnDestroy {
+  readonly sectionHelp = {
+    marketStatus: 'What: current market phase and countdown to the next session event. How: the bot uses this to decide whether it can trade, pause, or wait for consent.',
+    accountVerification: 'What: broker or paper account connectivity and balances. How: verify this before starting the bot so you know credentials and capital are available.',
+    botConfig: 'What: bot risk and execution settings. How: set watchlist, confidence, size, cycle interval, stop loss, and take profit before pressing Start.',
+    positions: 'What: open bot-managed positions. How: monitor entries, quantity, and running PnL while the bot is active.',
+    pnlSummary: 'What: session-level bot performance summary. How: use it to track overall PnL, cycles, and how many trades have been taken today.',
+    tradeLog: 'What: chronological bot trade activity. How: review entries, exits, and realized PnL to understand what the bot is doing.',
+    errors: 'What: recent bot errors and execution issues. How: check here first if the bot pauses unexpectedly or stops taking trades.',
+  };
   market: MarketStatus | null = null;
   account: AccountProfile | null = null;
   accountLoading = false;

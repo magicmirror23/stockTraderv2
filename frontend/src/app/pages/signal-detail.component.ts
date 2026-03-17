@@ -14,7 +14,7 @@ import { Subscription } from 'rxjs';
     <div class="page">
       <h1>Options Signal</h1>
 
-      <div class="card mb-2">
+      <div class="card mb-2" [attr.title]="sectionHelp.parameters">
         <h2>Option Parameters</h2>
         <div class="form-row">
           <div class="form-group">
@@ -46,7 +46,7 @@ import { Subscription } from 'rxjs';
       </div>
 
       <div *ngIf="signal" class="grid-2 mb-2">
-        <div class="card">
+        <div class="card" [attr.title]="sectionHelp.signal">
           <h2>Signal</h2>
           <table>
             <tbody>
@@ -70,7 +70,7 @@ import { Subscription } from 'rxjs';
           </table>
         </div>
 
-        <div class="card">
+        <div class="card" [attr.title]="sectionHelp.greeks">
           <h2>Greeks</h2>
           <div class="greeks-grid">
             <div class="greek-cell"><span class="stat-label">Delta</span><span class="stat-value">{{ signal.greeks.delta | number:'1.4-4' }}</span></div>
@@ -83,7 +83,26 @@ import { Subscription } from 'rxjs';
         </div>
       </div>
 
-      <div class="card">
+      <div *ngIf="signal?.explanation" class="card mb-2" [attr.title]="sectionHelp.explanation">
+        <h2>Why This Signal</h2>
+        <p class="text-muted mb-1">{{ signal?.explanation?.summary }}</p>
+        <div class="grid-3">
+          <div class="greek-cell">
+            <span class="stat-label">Market Regime</span>
+            <span class="stat-value text-sm">{{ signal?.explanation?.market_regime }}</span>
+          </div>
+          <div class="greek-cell">
+            <span class="stat-label">News Regime</span>
+            <span class="stat-value text-sm">{{ signal?.explanation?.news_regime }}</span>
+          </div>
+          <div class="greek-cell">
+            <span class="stat-label">Decision Gate</span>
+            <span class="stat-value text-sm">{{ signal?.explanation?.confidence_band }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" [attr.title]="sectionHelp.chart">
         <div class="flex justify-between items-center">
           <h2>Live Chart: {{ underlying }}</h2>
           <div style="display:flex; gap:0.5rem;">
@@ -105,6 +124,13 @@ import { Subscription } from 'rxjs';
   `]
 })
 export class SignalDetailComponent {
+  readonly sectionHelp = {
+    parameters: 'What: option signal request form. How: choose underlying, strike, expiry, and call/put type before fetching the model output.',
+    signal: 'What: option model recommendation. How: review action, confidence, expected return, and model metadata before acting.',
+    explanation: 'What: human-readable explanation of the option signal. How: use it to quickly understand the market regime and news backdrop behind the recommendation.',
+    greeks: 'What: option sensitivity measures. How: use delta, gamma, theta, vega, and IV to understand risk around the option signal.',
+    chart: 'What: live price chart for the underlying instrument. How: connect the feed to watch the underlying move while evaluating the options signal.',
+  };
   underlying = 'NIFTY';
   strike = 22000;
   expiry = '2025-02-27';

@@ -104,3 +104,31 @@ def test_paper_sell_updates_holdings_and_cash(client, monkeypatch):
     payload = sell.json()
     assert "TCS" not in payload["account_state_after"]["holdings"]
     assert payload["account_state_after"]["available_cash"] > payload["account_state_before"]["available_cash"]
+
+
+def test_paper_metrics_include_portfolio_analytics(client, monkeypatch):
+    _mock_price(monkeypatch, price=100.0)
+    create = client.post("/api/v1/paper/accounts", json={"initial_cash": 10000})
+    account_id = create.json()["account_id"]
+
+    buy = client.post(
+        f"/api/v1/paper/{account_id}/order_intent",
+        json={"ticker": "RELIANCE", "side": "buy", "quantity": 10, "order_type": "market"},
+    )
+    assert buy.status_code == 200
+
+    _mock_price(monkeypatch, price=115.0)
+    sell = client.post(
+        f"/api/v1/paper/{account_id}/order_intent",
+        json={"ticker": "RELIANCE", "side": "sell", "quantity": 5, "order_type": "market"},
+    )
+    assert sell.status_code == 200
+
+    metrics = client.get(f"/api/v1/paper/{account_id}/metrics")
+    assert metrics.status_code == 200
+    payload = metrics.json()
+    assert "current_equity" in payload
+    assert "total_return_pct" in payload
+    assert "holdings" in payload
+    assert payload["open_positions"] >= 1
+    assert payload["holdings"][0]["ticker"] == "RELIANCE"

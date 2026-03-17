@@ -36,7 +36,8 @@ def _prediction_entry(ticker: str, result: dict, now: datetime) -> PredictionEnt
         expected_return=result["expected_return"],
         model_version=result["model_version"],
         calibration_score=result.get("calibration_score"),
-        shap_top_features=["demo_fallback"] if result.get("fallback") else None,
+        shap_top_features=result.get("shap_top_features") or (["demo_fallback"] if result.get("fallback") else None),
+        explanation=result.get("explanation"),
         timestamp=now,
     )
 
@@ -83,7 +84,8 @@ async def predict_options(req: OptionPredictRequest):
         greeks=Greeks(**greeks_dict),
         model_version=result["model_version"],
         calibration_score=result.get("calibration_score"),
-        shap_top_features=["demo_fallback"] if result.get("fallback") else None,
+        shap_top_features=result.get("shap_top_features") or (["demo_fallback"] if result.get("fallback") else None),
+        explanation=result.get("explanation"),
         timestamp=now,
     )
     return OptionPredictResponse(signal=signal, model_version=result["model_version"], timestamp=now)

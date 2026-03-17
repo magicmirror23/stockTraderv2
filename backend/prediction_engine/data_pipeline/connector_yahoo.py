@@ -28,6 +28,8 @@ class YahooConnector:
     SYMBOL_ALIASES = {
         "BAJAJ_AUTO": ["BAJAJ-AUTO.NS"],
         "M_M": ["M&M.NS"],
+        "TATAMOTORS": ["TATAMOTORS.NS", "500570.BO"],
+        "VARUNBEV": ["VBL.NS", "VARUNBEV.NS"],
         "NIFTY50": ["^NSEI"],
         "BANKNIFTY": ["^NSEBANK"],
         "INDIAVIX": ["^INDIAVIX"],

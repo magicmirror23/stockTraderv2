@@ -20,12 +20,12 @@ import { OrderIntentFormComponent, OrderIntentData } from '../components/order-i
 
       <app-simulation-summary-card [accountId]="accountId" />
 
-      <div class="card mt-2">
+      <div class="card mt-2" [attr.title]="sectionHelp.equityCurve">
         <h2>Equity Curve</h2>
         <app-equity-chart [data]="equity" />
       </div>
 
-      <div class="card mt-2">
+      <div class="card mt-2" [attr.title]="sectionHelp.replay">
         <h2>Replay Simulation</h2>
         <div class="form-row">
           <div class="form-group">
@@ -45,13 +45,13 @@ import { OrderIntentFormComponent, OrderIntentData } from '../components/order-i
         <pre *ngIf="replayResult" class="replay-result">{{ replayResult | json }}</pre>
       </div>
 
-      <div class="card mt-2">
+      <div class="card mt-2" [attr.title]="sectionHelp.orderIntent">
         <h2>Submit Order Intent</h2>
         <app-order-intent-form (intentSubmit)="submitOrder($event)" />
       </div>
     </div>
     <div *ngIf="!accountId" class="page">
-      <div class="card" style="text-align:center; padding: 3rem;">
+      <div class="card" style="text-align:center; padding: 3rem;" [attr.title]="sectionHelp.emptyState">
         <p class="text-muted">No account selected. Go back to the dashboard.</p>
       </div>
     </div>
@@ -61,6 +61,12 @@ import { OrderIntentFormComponent, OrderIntentData } from '../components/order-i
   `]
 })
 export class PaperAccountDetailComponent implements OnInit {
+  readonly sectionHelp = {
+    equityCurve: 'What: equity growth of this paper account. How: use it to see how account value changed after paper trades and replays.',
+    replay: 'What: historical market replay runner. How: choose a date and speed to simulate trading behavior on past data.',
+    orderIntent: 'What: paper order entry form. How: submit simulated orders here to test execution logic without risking capital.',
+    emptyState: 'What: no paper account has been selected. How: return to the paper dashboard and choose or create an account first.',
+  };
   accountId: string | null = null;
   equity: EquityPoint[] = [];
   replayDate = '2025-01-02';

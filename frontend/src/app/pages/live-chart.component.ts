@@ -30,7 +30,7 @@ interface LastClose {
       </div>
 
       <!-- Market Status Banner -->
-      <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')">
+      <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')" [attr.title]="sectionHelp.marketStatus">
         <div class="flex justify-between items-center">
           <div class="flex items-center gap-1">
             <span class="market-dot" [ngClass]="{'dot-open': market?.phase === 'open', 'dot-pre': market?.phase === 'pre_open', 'dot-closed': market?.phase !== 'open' && market?.phase !== 'pre_open'}"></span>
@@ -46,7 +46,7 @@ interface LastClose {
         </div>
       </div>
 
-      <div class="card mb-2">
+      <div class="card mb-2" [attr.title]="sectionHelp.controls">
         <div class="form-row">
           <div class="form-group">
             <label>Symbol</label>
@@ -75,7 +75,7 @@ interface LastClose {
       </div>
 
       <!-- Last Close Card (shown when market closed) -->
-      <div *ngIf="lastClose && !streaming" class="card mb-2 last-close-card">
+      <div *ngIf="lastClose && !streaming" class="card mb-2 last-close-card" [attr.title]="sectionHelp.lastClose">
         <div class="flex justify-between items-center">
           <div>
             <h2 style="margin:0;">{{ lastClose.symbol }} — Last Close</h2>
@@ -90,7 +90,7 @@ interface LastClose {
         </div>
       </div>
 
-      <div class="card">
+      <div class="card" [attr.title]="sectionHelp.chart">
         <app-live-price-chart [data]="ticks" />
         <div *ngIf="!streaming && ticks.length === 0 && !lastClose" style="text-align:center; padding:2rem;">
           <p class="text-muted" *ngIf="isMarketOpen">Enter a symbol and click Connect to start streaming live prices.</p>
@@ -144,6 +144,12 @@ interface LastClose {
   `]
 })
 export class LiveChartComponent implements OnInit, OnDestroy {
+  readonly sectionHelp = {
+    marketStatus: 'What: current market session state for this symbol. How: use it to decide whether to stream live ticks or inspect last-close data.',
+    controls: 'What: single-symbol live chart controls. How: enter a symbol, connect the stream, or switch to last-close mode when the market is closed.',
+    lastClose: 'What: most recent closing-price snapshot. How: use this when the market is closed and no live ticks are available.',
+    chart: 'What: live or replay price chart for the selected symbol. How: connect the stream to watch incoming ticks build the chart in real time.',
+  };
   symbol = 'RELIANCE';
   ticks: PriceTick[] = [];
   streaming = false;

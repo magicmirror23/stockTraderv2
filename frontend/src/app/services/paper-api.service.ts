@@ -11,6 +11,31 @@ export interface AccountMetrics {
   win_rate: number | null;
   total_trades: number;
   net_pnl: number;
+  profit_factor?: number | null;
+  avg_win?: number | null;
+  avg_loss?: number | null;
+  best_trade?: number | null;
+  worst_trade?: number | null;
+  realized_pnl?: number;
+  unrealized_pnl?: number;
+  starting_cash?: number;
+  current_cash?: number;
+  current_equity?: number;
+  total_return_pct?: number;
+  cash_utilization_pct?: number;
+  open_positions?: number;
+  holdings?: PortfolioHolding[];
+}
+
+export interface PortfolioHolding {
+  ticker: string;
+  quantity: number;
+  avg_price: number;
+  last_price: number;
+  cost_basis: number;
+  market_value: number;
+  unrealized_pnl: number;
+  weight_pct: number;
 }
 
 export interface PaperAccount {

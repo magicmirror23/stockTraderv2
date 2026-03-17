@@ -4,6 +4,33 @@ import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
 
+export interface PredictionThresholdContext {
+  buy_threshold?: number;
+  sell_threshold?: number;
+  min_signal_confidence?: number;
+  confidence_gap?: number;
+  edge_score?: number;
+}
+
+export interface PredictionDriver {
+  feature: string;
+  label: string;
+  value: number;
+  direction: 'bullish' | 'bearish' | 'neutral' | string;
+  insight: string;
+}
+
+export interface PredictionExplanation {
+  summary: string;
+  confidence_band: string;
+  market_regime: string;
+  news_regime: string;
+  decision_gate: string;
+  drivers: PredictionDriver[];
+  risk_flags: string[];
+  thresholds: PredictionThresholdContext;
+}
+
 export interface PredictionResult {
   ticker: string;
   action: 'buy' | 'sell' | 'hold';
@@ -12,6 +39,7 @@ export interface PredictionResult {
   model_version: string;
   calibration_score?: number;
   shap_top_features?: string[];
+  explanation?: PredictionExplanation;
   timestamp: string;
 }
 
@@ -37,6 +65,7 @@ export interface OptionSignal {
   model_version: string;
   calibration_score?: number;
   shap_top_features?: string[];
+  explanation?: PredictionExplanation;
   timestamp: string;
 }
 

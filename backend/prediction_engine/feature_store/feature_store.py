@@ -17,7 +17,11 @@ import numpy as np
 import pandas as pd
 
 from backend.core.config import settings
-from backend.prediction_engine.data_pipeline.connector_news import topic_feature_columns, topic_queries
+from backend.prediction_engine.data_pipeline.connector_news import (
+    company_feature_columns,
+    topic_feature_columns,
+    topic_queries,
+)
 from backend.prediction_engine.feature_store.normalization import normalize_features_per_ticker
 from backend.prediction_engine.model_features import MODEL_INPUT_COLUMNS
 from backend.prediction_engine.feature_store import transforms as T
@@ -34,6 +38,7 @@ NEWS_AGGREGATE_FEATURE_COLUMNS: list[str] = [
     "news_geopolitical_risk_30d",
 ]
 ALL_NEWS_FEATURE_COLUMNS: list[str] = NEWS_FEATURE_COLUMNS + NEWS_AGGREGATE_FEATURE_COLUMNS
+COMPANY_NEWS_FEATURE_COLUMNS: list[str] = company_feature_columns()
 
 # Ordered list of feature columns produced by build_features.
 FEATURE_COLUMNS: list[str] = [
@@ -114,6 +119,8 @@ FEATURE_COLUMNS: list[str] = [
     # News and event context
     *topic_feature_columns(),
     *NEWS_AGGREGATE_FEATURE_COLUMNS,
+    # Company-specific news context
+    *COMPANY_NEWS_FEATURE_COLUMNS,
 ]
 
 CONTEXT_FEATURE_COLUMNS: list[str] = [
@@ -419,6 +426,83 @@ def _merge_news_features(
     return merged
 
 
+def _load_company_news_features(
+    ticker: str,
+    companies_dir: Path,
+    news_mode: Literal["training", "inference"] = "training",
+) -> pd.DataFrame:
+    path = companies_dir / f"{ticker}.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=["date"] + COMPANY_NEWS_FEATURE_COLUMNS)
+
+    frame = pd.read_csv(path, parse_dates=["date"]).sort_values("date").reset_index(drop=True)
+    if frame.empty:
+        return pd.DataFrame(columns=["date"] + COMPANY_NEWS_FEATURE_COLUMNS)
+
+    renamed = frame.rename(
+        columns={
+            "sentiment_7d": "company_sentiment_7d",
+            "sentiment_30d": "company_sentiment_30d",
+            "headline_count_7d": "company_headline_count_7d",
+            "headline_count_30d": "company_headline_count_30d",
+            "event_score_7d": "company_event_score_7d",
+            "event_score_30d": "company_event_score_30d",
+        }
+    )
+    for column in [
+        "company_sentiment_7d",
+        "company_sentiment_30d",
+        "company_headline_count_7d",
+        "company_headline_count_30d",
+        "company_event_score_7d",
+        "company_event_score_30d",
+    ]:
+        if column not in renamed.columns:
+            renamed[column] = 0.0
+
+    trailing_attention = renamed["company_headline_count_30d"].replace(0, np.nan) / 4.0
+    renamed["company_news_attention_shock"] = (
+        renamed["company_headline_count_7d"] / trailing_attention
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    renamed["company_event_intensity"] = (
+        renamed["company_event_score_7d"].abs() * np.log1p(renamed["company_headline_count_7d"])
+    )
+    if news_mode == "training":
+        renamed[COMPANY_NEWS_FEATURE_COLUMNS] = renamed[COMPANY_NEWS_FEATURE_COLUMNS].shift(1)
+    renamed[COMPANY_NEWS_FEATURE_COLUMNS] = renamed[COMPANY_NEWS_FEATURE_COLUMNS].replace(
+        [np.inf, -np.inf],
+        np.nan,
+    ).fillna(0.0)
+    return renamed[["date"] + COMPANY_NEWS_FEATURE_COLUMNS]
+
+
+def _merge_company_news_features(
+    features: pd.DataFrame,
+    companies_dir: Path,
+    news_mode: Literal["training", "inference"] = "training",
+) -> pd.DataFrame:
+    groups: list[pd.DataFrame] = []
+    for ticker, group in features.groupby("ticker", sort=False):
+        company_news = _load_company_news_features(ticker, companies_dir, news_mode=news_mode)
+        if company_news.empty:
+            for column in COMPANY_NEWS_FEATURE_COLUMNS:
+                group[column] = 0.0
+            groups.append(group)
+            continue
+
+        merged_group = pd.merge_asof(
+            group.sort_values("date"),
+            company_news.sort_values("date"),
+            on="date",
+            direction="backward",
+        )
+        merged_group = merged_group.sort_values("date").reset_index(drop=True)
+        merged_group[COMPANY_NEWS_FEATURE_COLUMNS] = merged_group[COMPANY_NEWS_FEATURE_COLUMNS].fillna(0.0)
+        groups.append(merged_group)
+
+    return pd.concat(groups, ignore_index=True)
+
+
 def _latest_news_snapshot(news_dir: Path) -> dict[str, float]:
     news = _load_news_features(news_dir, news_mode="inference")
     if news.empty:
@@ -427,6 +511,17 @@ def _latest_news_snapshot(news_dir: Path) -> dict[str, float]:
     return {
         column: float(row[column]) if pd.notna(row[column]) else 0.0
         for column in ALL_NEWS_FEATURE_COLUMNS
+    }
+
+
+def _latest_company_news_snapshot(ticker: str, companies_dir: Path) -> dict[str, float]:
+    company_news = _load_company_news_features(ticker, companies_dir, news_mode="inference")
+    if company_news.empty:
+        return {column: 0.0 for column in COMPANY_NEWS_FEATURE_COLUMNS}
+    row = company_news.iloc[-1]
+    return {
+        column: float(row[column]) if pd.notna(row[column]) else 0.0
+        for column in COMPANY_NEWS_FEATURE_COLUMNS
     }
 
 
@@ -476,6 +571,7 @@ def build_features(
     data_dir: str | Path = "storage/raw",
     context_dir: str | Path | None = None,
     news_dir: str | Path | None = None,
+    company_news_dir: str | Path | None = None,
     news_mode: Literal["training", "inference"] = "training",
 ) -> pd.DataFrame:
     """Build the full feature matrix for a list of tickers.
@@ -497,6 +593,9 @@ def build_features(
     data_dir = Path(data_dir)
     resolved_context_dir = Path(context_dir) if context_dir is not None else settings.context_data_path
     resolved_news_dir = Path(news_dir) if news_dir is not None else settings.news_data_path / "topics"
+    resolved_company_news_dir = (
+        Path(company_news_dir) if company_news_dir is not None else settings.news_data_path / "companies"
+    )
     frames: list[pd.DataFrame] = []
 
     for ticker in tickers:
@@ -515,6 +614,7 @@ def build_features(
     result = pd.concat(frames, ignore_index=True)
     result = _merge_context_features(result, resolved_context_dir)
     result = _merge_news_features(result, resolved_news_dir, news_mode=news_mode)
+    result = _merge_company_news_features(result, resolved_company_news_dir, news_mode=news_mode)
     result = _add_breadth_and_relative_features(result)
 
     # Date filtering
@@ -538,6 +638,7 @@ def get_features_for_inference(
     data_dir: str | Path = "storage/raw",
     context_dir: str | Path | None = None,
     news_dir: str | Path | None = None,
+    company_news_dir: str | Path | None = None,
 ) -> dict:
     """Return the latest feature vector for a single ticker.
 
@@ -574,11 +675,15 @@ def get_features_for_inference(
             logger.warning("News context refresh skipped during inference: %s", exc)
 
     resolved_news_dir = Path(news_dir) if news_dir is not None else settings.news_data_path / "topics"
+    resolved_company_news_dir = (
+        Path(company_news_dir) if company_news_dir is not None else settings.news_data_path / "companies"
+    )
     feat = build_features(
         universe,
         data_dir=data_dir,
         context_dir=context_dir,
         news_dir=resolved_news_dir,
+        company_news_dir=resolved_company_news_dir,
         news_mode="inference",
     )
     feat = feat[feat["ticker"] == ticker].reset_index(drop=True)
@@ -594,6 +699,8 @@ def get_features_for_inference(
     latest_news = _latest_news_snapshot(resolved_news_dir)
     latest_index = feat.index[-1]
     for column, value in latest_news.items():
+        feat.loc[latest_index, column] = value
+    for column, value in _latest_company_news_snapshot(ticker, resolved_company_news_dir).items():
         feat.loc[latest_index, column] = value
 
     # Keep inference numerically aligned with training by reusing the same

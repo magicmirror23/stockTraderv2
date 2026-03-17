@@ -38,11 +38,17 @@ class TrainingDataRefreshReport:
     news_refreshed: list[str]
     news_reused: list[str]
     news_failed: dict[str, str]
+    company_news_tickers: list[str]
+    company_news_downloaded: list[str]
+    company_news_refreshed: list[str]
+    company_news_reused: list[str]
+    company_news_failed: dict[str, str]
     start_date: str
     end_date: str
     data_dir: str
     context_dir: str | None
     news_dir: str | None
+    company_news_dir: str | None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -100,11 +106,17 @@ def ensure_training_data(
         news_refreshed=[],
         news_reused=[],
         news_failed={},
+        company_news_tickers=[],
+        company_news_downloaded=[],
+        company_news_refreshed=[],
+        company_news_reused=[],
+        company_news_failed={},
         start_date=start_dt.date().isoformat(),
         end_date=end_dt.date().isoformat(),
         data_dir=str(output_dir),
         context_dir=str(context_dir) if context_symbols else None,
         news_dir=str(settings.news_data_path / "topics") if settings.ENABLE_NEWS_FEATURES else None,
+        company_news_dir=str(settings.news_data_path / "companies") if settings.ENABLE_NEWS_FEATURES else None,
     )
 
     valid_names = {f"{ticker}.csv" for ticker in resolved_tickers}
@@ -192,13 +204,18 @@ def ensure_training_data(
 
     if settings.ENABLE_NEWS_FEATURES:
         try:
-            news_report = get_news_context_manager().ensure_recent(force=True)
+            news_report = get_news_context_manager().ensure_recent(force=True, tickers=resolved_tickers)
             if news_report is not None:
                 report.news_topics = news_report.topics
                 report.news_downloaded = news_report.downloaded
                 report.news_refreshed = news_report.refreshed
                 report.news_reused = news_report.reused
                 report.news_failed = news_report.failed
+                report.company_news_tickers = news_report.company_tickers
+                report.company_news_downloaded = news_report.company_downloaded
+                report.company_news_refreshed = news_report.company_refreshed
+                report.company_news_reused = news_report.company_reused
+                report.company_news_failed = news_report.company_failed
         except Exception as exc:
             report.news_failed["__global__"] = str(exc)
             logger.warning("Failed to refresh news context: %s", exc)

@@ -16,10 +16,8 @@ MODEL_INPUT_COLUMNS: list[str] = [
     "return_10d", "distance_sma200", "price_pos_52w",
     "stoch_d", "rsi_divergence",
     # Demo-strategy features
-    "force_index", "high_low_ratio",
-    "return_mean_5", "return_mean_10", "return_skew_10",
-    "volume_change", "close_to_ma20", "close_to_ma50",
-    "return_lag_1", "return_lag_5", "day_of_week",
+    "force_index",
+    "return_lag_1", "return_lag_5",
     # Market, macro, and regime context
     "market_return_1d", "market_return_5d", "market_trend_20", "market_volatility_20",
     "india_vix_close", "india_vix_return_5d", "usd_inr_return_5d",
@@ -43,4 +41,13 @@ MODEL_INPUT_COLUMNS: list[str] = [
     "news_sentiment_momentum_30d",
     "news_attention_30d",
     "news_geopolitical_risk_30d",
+    # Company-specific news and event context
+    "company_sentiment_7d",
+    "company_sentiment_30d",
+    "company_headline_count_7d",
+    "company_headline_count_30d",
+    "company_event_score_7d",
+    "company_event_score_30d",
+    "company_news_attention_shock",
+    "company_event_intensity",
 ]
