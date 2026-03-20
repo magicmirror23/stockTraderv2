@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     ENABLE_LIVE_BROKER: bool = False
     ENABLE_REPLAY_FALLBACK: bool = True
     ENABLE_DEMO_MODE: bool = True
+    AUTO_CONNECT_LIVE_FEED_ON_STARTUP: bool = False
 
     MLFLOW_TRACKING_URI: str | None = None
     SENTRY_DSN: str | None = None
@@ -129,6 +130,10 @@ class Settings(BaseSettings):
     @property
     def demo_enabled(self) -> bool:
         return self.ENABLE_DEMO_MODE or self.PAPER_MODE
+
+    @property
+    def live_feed_autoconnect_on_startup(self) -> bool:
+        return self.AUTO_CONNECT_LIVE_FEED_ON_STARTUP and self.live_broker_enabled
 
     @property
     def has_redis(self) -> bool:

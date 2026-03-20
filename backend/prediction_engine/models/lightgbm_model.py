@@ -11,6 +11,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from backend.prediction_engine.model_features import feature_set_version
 from backend.prediction_engine.models.base_model import BaseModel
 
 try:
@@ -267,6 +268,10 @@ class LightGBMModel(BaseModel):
             "seed": self._seed,
             "params": self._params,
             "metrics": self._metrics,
+            "feature_set_version": feature_set_version(),
+            "feature_count": len(getattr(self._model, "feature_name", lambda: [])() or []),
+            "calibration_status": "reported" if self._metrics.get("calibration_score") is not None else "not_reported",
+            "explainability_mode": "shap_optional",
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         meta_file.write_text(json.dumps(meta, indent=2))

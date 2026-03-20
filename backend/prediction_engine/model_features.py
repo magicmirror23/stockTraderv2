@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 MODEL_INPUT_COLUMNS: list[str] = [
     # Normalised price relationships (no raw prices - they don't generalise)
     "rsi_14", "macd", "macd_signal", "macd_hist",
@@ -51,3 +53,9 @@ MODEL_INPUT_COLUMNS: list[str] = [
     "company_news_attention_shock",
     "company_event_intensity",
 ]
+
+
+def feature_set_version() -> str:
+    """Stable version hash for the active model feature contract."""
+    joined = "|".join(MODEL_INPUT_COLUMNS)
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]

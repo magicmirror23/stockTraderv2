@@ -16,7 +16,7 @@ from backend.api.schemas import (
 from backend.paper_trading.paper_account import PaperAccountManager
 from backend.paper_trading.paper_executor import PaperExecutor
 from backend.paper_trading.paper_replayer import PaperReplayer
-from backend.services.risk_manager import RiskConfig
+from backend.services.risk_manager import RiskConfig, RiskManager
 from backend.trading_engine.account_state import ValidationRules, fetch_paper_account_state
 from backend.trading_engine.execution_engine import AccountStateExecutionEngine
 
@@ -40,6 +40,14 @@ def _get_execution_engine() -> AccountStateExecutionEngine:
         )
         _execution_engine = AccountStateExecutionEngine(validation_rules=rules)
         return _execution_engine
+
+
+def _paper_risk_manager(account) -> RiskManager:
+    manager = RiskManager(capital=max(account.equity, account.cash, 0.0), config=RiskConfig())
+    manager.daily_pnl = float(account.realized_pnl)
+    manager.record_equity_snapshot(float(account.equity))
+    manager.sync_account_state(fetch_paper_account_state(account))
+    return manager
 
 
 @router.post("/paper/accounts", response_model=PaperAccountResponse, status_code=201)
@@ -180,7 +188,7 @@ async def paper_order_intent(account_id: str, req: PaperOrderIntentRequest):
     if not tick:
         raise HTTPException(status_code=404, detail=f"No price data for {req.ticker}")
 
-    before_state, validation = _get_execution_engine().validate_paper_order(
+    before_state, validation, _risk_decision = _get_execution_engine().validate_paper_order(
         account=account,
         order_intent={
             "ticker": req.ticker.upper(),
@@ -191,6 +199,7 @@ async def paper_order_intent(account_id: str, req: PaperOrderIntentRequest):
             "expiry": req.expiry,
         },
         current_price=tick.price,
+        risk_manager=_paper_risk_manager(account),
     )
     if not validation.allowed:
         raise HTTPException(status_code=422, detail=validation.reason)

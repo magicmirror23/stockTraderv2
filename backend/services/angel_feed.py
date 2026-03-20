@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,6 +18,8 @@ logger = logging.getLogger(__name__)
 TOKEN_CACHE = settings.storage_path / "angel_tokens.json"
 NSE_CM = 1
 BSE_CM = 3
+CONNECT_WAIT_ATTEMPTS = 60
+CONNECT_WAIT_INTERVAL_SECONDS = 0.2
 
 _INDEX_TOKENS: dict[str, dict[str, Any]] = {
     "NIFTY50": {"token": "99926000", "exchange": NSE_CM, "tradingsymbol": "NIFTY 50"},
@@ -48,6 +51,7 @@ class AngelLiveFeed:
         self._socket = None
         self._auth_token: str | None = None
         self._feed_token: str | None = None
+        self._connection_generation = 0
         self._status: dict[str, Any] = {
             "mode": "unavailable",
             "available": settings.live_broker_enabled,
@@ -111,12 +115,19 @@ class AngelLiveFeed:
 
         self._set_status(mode="waking", connected=False, last_error=None)
 
+        requested_symbols = list(dict.fromkeys(symbol.upper() for symbol in symbols if symbol))
+        with self._lock:
+            connected = bool(self._status["connected"])
+            subscribed_symbols = list(self._status.get("subscribed_symbols", []))
+        if connected and set(requested_symbols).issubset(set(subscribed_symbols)):
+            return self.snapshot()
+
         if not self._authenticate():
             fallback_mode = "replay" if settings.replay_enabled else "unavailable"
             logger.warning("Angel feed auth failed; falling back", extra={"mode": fallback_mode})
             return self._set_status(mode=fallback_mode, connected=False, last_error=self._status["last_error"])
 
-        resolved = self._resolve_tokens(symbols)
+        resolved = self._resolve_tokens(requested_symbols)
         if not resolved:
             fallback_mode = "replay" if settings.replay_enabled else "unavailable"
             return self._set_status(mode=fallback_mode, connected=False, last_error="no_tokens_resolved")
@@ -139,57 +150,69 @@ class AngelLiveFeed:
             token_list.setdefault(info["exchange"], []).append(info["token"])
 
         subscriptions = [{"exchangeType": exchange, "tokens": tokens} for exchange, tokens in token_list.items()]
-        self._socket = SmartWebSocketV2(self._auth_token, settings.ANGEL_API_KEY, settings.ANGEL_CLIENT_ID, self._feed_token)
+        generation = self._begin_connection()
+        socket = SmartWebSocketV2(self._auth_token, settings.ANGEL_API_KEY, settings.ANGEL_CLIENT_ID, self._feed_token)
+        with self._lock:
+            self._socket = socket
 
         def on_open(_wsapp):
+            if not self._is_generation_active(generation):
+                return
             logger.info("Angel feed connected", extra={"mode": "live"})
             self._set_status(mode="live", connected=True, authenticated=True, subscribed_symbols=resolved, last_error=None)
             try:
                 logger.info("Angel feed subscribing", extra={"mode": "live"})
-                self._socket.subscribe("stocktrader", 2, subscriptions)
+                socket.subscribe("stocktrader", 2, subscriptions)
             except Exception as exc:
                 logger.warning("Angel feed subscribe failed: %s", exc)
-                self._fallback("subscribe_failed")
+                self._fallback("subscribe_failed", generation=generation)
 
         def on_data(_wsapp, message):
+            if not self._is_generation_active(generation):
+                return
             self._record_tick(message)
 
         def on_error(_wsapp, error):
+            if not self._is_generation_active(generation):
+                return
             logger.warning("Angel feed websocket error: %s", error)
-            self._fallback(str(error))
+            self._fallback(str(error), generation=generation)
 
         def on_close(_wsapp):
+            if not self._is_generation_active(generation):
+                return
             logger.info("Angel feed websocket closed")
             if settings.replay_enabled:
-                self._fallback("socket_closed")
+                self._fallback("socket_closed", generation=generation)
             else:
                 self._set_status(mode="unavailable", connected=False, last_error="socket_closed")
 
-        self._socket.on_open = on_open
-        self._socket.on_data = on_data
-        self._socket.on_error = on_error
-        self._socket.on_close = on_close
+        socket.on_open = on_open
+        socket.on_data = on_data
+        socket.on_error = on_error
+        socket.on_close = on_close
 
-        thread = threading.Thread(target=self._socket.connect, daemon=True, name="angel-live-feed")
+        thread = threading.Thread(target=socket.connect, daemon=True, name="angel-live-feed")
         thread.start()
 
-        for _ in range(30):
-            if self.is_connected:
+        for _ in range(CONNECT_WAIT_ATTEMPTS):
+            if self.is_connected and self._is_generation_active(generation):
                 break
-            time.sleep(0.2)
+            time.sleep(CONNECT_WAIT_INTERVAL_SECONDS)
 
-        if not self.is_connected:
-            self._fallback("connect_timeout")
+        if not self.is_connected and self._is_generation_active(generation):
+            self._fallback("connect_timeout", generation=generation)
 
         return self.snapshot()
 
     def stop(self) -> dict[str, Any]:
-        if self._socket is not None:
-            try:
-                self._socket.close_connection()
-            except Exception:
-                logger.debug("Angel socket close raised; ignoring")
-        self._socket = None
+        with self._lock:
+            self._connection_generation += 1
+            socket = self._socket
+            self._socket = None
+        if socket is not None:
+            with suppress(Exception):
+                socket.close_connection()
         return self._set_status(
             mode="replay" if settings.replay_enabled else "unavailable",
             connected=False,
@@ -208,19 +231,26 @@ class AngelLiveFeed:
             self._set_status(last_error=f"smartapi_dependencies_missing:{missing}")
             return False
 
+        with self._lock:
+            if self._smart_api is not None and self._auth_token and self._feed_token and self._status.get("authenticated"):
+                return True
+
         try:
             totp = pyotp.TOTP(settings.ANGEL_TOTP_SECRET).now()
             self._smart_api = SmartConnect(api_key=settings.ANGEL_API_KEY)
             session = self._smart_api.generateSession(settings.ANGEL_CLIENT_ID, settings.ANGEL_CLIENT_PIN, totp)
             if not session or session.get("status") is False:
-                self._set_status(last_error=(session or {}).get("message", "angel_login_failed"))
+                self._set_status(
+                    authenticated=False,
+                    last_error=(session or {}).get("message", "angel_login_failed"),
+                )
                 return False
             self._auth_token = session["data"]["jwtToken"]
             self._feed_token = self._smart_api.getfeedToken()
             self._set_status(authenticated=True, available=True)
             return True
         except Exception as exc:
-            self._set_status(last_error=f"angel_auth_error:{exc}")
+            self._set_status(authenticated=False, last_error=f"angel_auth_error:{exc}")
             return False
 
     def _resolve_tokens(self, symbols: list[str]) -> list[str]:
@@ -331,10 +361,27 @@ class AngelLiveFeed:
             "source": "angel_one_quote",
         }
 
-    def _fallback(self, error: str) -> None:
+    def _fallback(self, error: str, generation: int | None = None) -> None:
+        if generation is not None and not self._is_generation_active(generation):
+            return
         mode = "replay" if settings.replay_enabled else "unavailable"
         logger.warning("Angel feed fallback_to_replay", extra={"mode": mode})
         self._set_status(mode=mode, connected=False, last_error=error)
+
+    def _begin_connection(self) -> int:
+        with self._lock:
+            self._connection_generation += 1
+            generation = self._connection_generation
+            socket = self._socket
+            self._socket = None
+        if socket is not None:
+            with suppress(Exception):
+                socket.close_connection()
+        return generation
+
+    def _is_generation_active(self, generation: int) -> bool:
+        with self._lock:
+            return self._connection_generation == generation
 
     def _set_status(self, **updates: Any) -> dict[str, Any]:
         with self._lock:

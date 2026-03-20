@@ -15,6 +15,36 @@ from backend.core.middleware import get_request_id
 logger = logging.getLogger(__name__)
 
 
+class AppError(Exception):
+    """Project-level application exception with an HTTP status code."""
+
+    status_code = 500
+    code = "APP_ERROR"
+
+    def __init__(self, message: str = "Application error", *, status_code: int | None = None, code: str | None = None):
+        super().__init__(message)
+        if status_code is not None:
+            self.status_code = status_code
+        if code is not None:
+            self.code = code
+
+
+class NotFoundError(AppError):
+    status_code = 404
+    code = "NOT_FOUND"
+
+    def __init__(self, message: str = "Resource not found"):
+        super().__init__(message)
+
+
+class AuthenticationError(AppError):
+    status_code = 401
+    code = "AUTHENTICATION_ERROR"
+
+    def __init__(self, message: str = "Authentication required"):
+        super().__init__(message)
+
+
 def _error_payload(code: str, message: str, request: Request, extras: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = {
         "detail": message,
@@ -28,6 +58,13 @@ def _error_payload(code: str, message: str, request: Request, extras: dict[str, 
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(AppError)
+    async def _app_exception_handler(request: Request, exc: AppError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_error_payload(exc.code, str(exc), request),
+        )
+
     @app.exception_handler(HTTPException)
     async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
         detail = exc.detail if isinstance(exc.detail, str) else "Request failed"

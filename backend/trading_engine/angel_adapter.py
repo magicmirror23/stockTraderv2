@@ -63,6 +63,12 @@ class BrokerAdapter(Protocol):
     def fetch_account_state(self) -> AccountState:
         ...
 
+    def supports_option_contracts(self) -> bool:
+        ...
+
+    def search_instruments(self, exchange: str, search_text: str) -> list[dict]:
+        ...
+
 
 @dataclass
 class SimulatedFill:
@@ -110,6 +116,13 @@ class AngelPaperAdapter:
 
     def get_account_type(self) -> str:
         return "paper"
+
+    def supports_option_contracts(self) -> bool:
+        return True
+
+    def search_instruments(self, exchange: str, search_text: str) -> list[dict]:
+        del exchange, search_text
+        return []
 
     def place_order(self, order_intent: dict) -> dict:
         for attempt in range(1, self.max_retries + 1):
@@ -354,6 +367,11 @@ class AngelLiveAdapter:
     def get_account_type(self) -> str:
         return "real"
 
+    def supports_option_contracts(self) -> bool:
+        # Contract lookup is available, but live options stay fail-closed until
+        # broker position/order normalization is fully validated end to end.
+        return False
+
     def _ensure_connected(self) -> None:
         if self._connected:
             return
@@ -377,7 +395,7 @@ class AngelLiveAdapter:
         self._ensure_connected()
         params = {
             "variety": "NORMAL",
-            "tradingsymbol": order_intent["ticker"],
+            "tradingsymbol": order_intent.get("tradingsymbol", order_intent["ticker"]),
             "symboltoken": order_intent.get("symbol_token", ""),
             "transactiontype": str(order_intent["side"]).upper(),
             "exchange": order_intent.get("exchange", "NSE"),
@@ -416,6 +434,16 @@ class AngelLiveAdapter:
                 if str(order.get("orderid")) == str(order_id):
                     return order
         return {"order_id": order_id, "status": "not_found"}
+
+    def search_instruments(self, exchange: str, search_text: str) -> list[dict]:
+        self._ensure_connected()
+        try:
+            response = self._smart_api.searchScrip(exchange, search_text)
+            data = response.get("data", []) if response else []
+            return list(data or [])
+        except Exception as exc:
+            logger.warning("Instrument search failed for %s on %s: %s", search_text, exchange, exc)
+            return []
 
     def get_ltp(self, ticker: str) -> dict:
         self._ensure_connected()
@@ -509,10 +537,30 @@ class AngelLiveAdapter:
         )
 
 
+_adapter_instance: BrokerAdapter | None = None
+_adapter_mode: str | None = None
+
+
+def reset_adapter_cache() -> None:
+    """Reset the shared adapter instance used across trading services."""
+    global _adapter_instance, _adapter_mode
+    _adapter_instance = None
+    _adapter_mode = None
+
+
 def get_adapter() -> BrokerAdapter:
-    """Return the appropriate broker adapter based on PAPER_MODE env var."""
+    """Return a shared broker adapter based on PAPER_MODE env var."""
+    global _adapter_instance, _adapter_mode
+
+    mode = "paper" if PAPER_MODE else "live"
+    if _adapter_instance is not None and _adapter_mode == mode:
+        return _adapter_instance
+
     if PAPER_MODE:
         logger.info("Using paper-mode adapter")
-        return AngelPaperAdapter()
-    logger.info("Using LIVE AngelOne SmartAPI adapter")
-    return AngelLiveAdapter()
+        _adapter_instance = AngelPaperAdapter()
+    else:
+        logger.info("Using LIVE AngelOne SmartAPI adapter")
+        _adapter_instance = AngelLiveAdapter()
+    _adapter_mode = mode
+    return _adapter_instance

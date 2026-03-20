@@ -115,6 +115,7 @@ class PredictionDriver(BaseModel):
     value: float
     direction: str
     insight: str
+    contribution: Optional[float] = None
 
 
 class PredictionExplanation(BaseModel):
@@ -234,6 +235,32 @@ class ModelStatusResponse(BaseModel):
         None, ge=0.0, le=1.0,
         description="Latest evaluation accuracy.",
     )
+    fallback: bool = False
+    last_error: Optional[str] = None
+
+
+class ModelMetadataResponse(BaseModel):
+    """Detailed metadata for the currently loaded model or fallback."""
+
+    model_version: str
+    status: str
+    last_trained: Optional[datetime] = None
+    accuracy: Optional[float] = None
+    fallback: bool = False
+    last_error: Optional[str] = None
+    registry_latest: Optional[str] = None
+    trained_model_available: bool = False
+    artifact_path: Optional[str] = None
+    feature_set_version: Optional[str] = None
+    feature_count: Optional[int] = None
+    training_data_snapshot_id: Optional[str] = None
+    calibration_status: Optional[str] = None
+    calibration_score: Optional[float] = None
+    explainability_mode: Optional[str] = None
+    mlflow_enabled: bool = False
+    shap_enabled: bool = False
+    signal_policy: dict = Field(default_factory=dict)
+    metrics: dict = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

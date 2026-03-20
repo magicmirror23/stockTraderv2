@@ -727,7 +727,7 @@ export class LiveMarketComponent implements OnInit, OnDestroy {
       next: res => {
         this.feedMode = res.feed_mode || res.mode || (res.connected ? 'live' : 'replay');
         this.connectingLive = false;
-        if (res.connected) {
+        if (res.mode !== 'unavailable') {
           this.startStream();
         }
       },

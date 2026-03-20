@@ -1,6 +1,6 @@
 # StockTrader
 
-StockTrader is a full-stack stock and options prediction platform with paper trading, replay streaming, and optional Angel One SmartAPI live market integration.
+StockTrader is a full-stack stock and options prediction platform with paper trading, replay streaming, production-style automation controls, and optional Angel One SmartAPI live market integration.
 
 The repository is now aligned to this deployment architecture:
 
@@ -34,7 +34,12 @@ Render backend
 - Paper trading and replay mode available without broker credentials
 - Backend-only Angel One auth, session, feed token, and websocket handling
 - Live tick normalization with replay fallback
+- Account-state-aware trading execution for both real and paper accounts
+- Dedicated equity bot plus a paper-safe options bot section
+- Runtime health view for market state, bot readiness, and execution support
+- Structured audit logging for bot actions, trade intents, executions, and fallback activation
 - Demo prediction fallback when model artifacts are missing
+- Detailed model metadata endpoint for version, feature contract, calibration, and fallback state
 - Optional Redis, Celery, MLflow, and Sentry
 - Angular frontend prepared for Vercel with Render-aware reconnect behavior
 
@@ -43,7 +48,7 @@ Render backend
 Supported local toolchain:
 
 - Python 3.12
-- Node.js 20 LTS
+- Node.js 22.22.1 LTS
 
 ### Backend
 
@@ -52,7 +57,22 @@ cd stocktrader
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --reload
+python run_backend.py
+```
+
+If you want backend auto-reload while editing backend code only:
+
+```bash
+cd stocktrader
+python run_backend.py --reload
+```
+
+If you prefer PowerShell wrappers, these do the same thing:
+
+```bash
+cd stocktrader
+pwsh -File .\scripts\run_backend_dev.ps1 -NoReload
+pwsh -File .\scripts\run_backend_dev.ps1
 ```
 
 Backend health:
@@ -91,8 +111,46 @@ In this mode the backend still starts and serves:
 - `/api/v1/health`
 - prediction endpoints
 - paper trading endpoints
+- equity bot endpoints
+- options bot endpoints
+- bot runtime health endpoint
 - stream status
 - replay WebSocket and SSE feeds
+
+## Automation Layer
+
+The project now includes two automation profiles:
+
+- Equity Bot
+  - long-only equity automation
+  - refreshes latest account state before every cycle
+  - checks holdings, cash, open orders, and risk limits before entry or exit
+- Options Bot
+  - currently designed as a production-safe paper-mode automation path
+  - uses underlying model signals to choose CE or PE contracts
+  - applies option-specific sizing, expiry, strike-distance, and exit rules
+
+Current bot API endpoints:
+
+- `/api/v1/bot/start`
+- `/api/v1/bot/stop`
+- `/api/v1/bot/status`
+- `/api/v1/bot/config`
+- `/api/v1/bot/consent`
+- `/api/v1/bot/options/start`
+- `/api/v1/bot/options/stop`
+- `/api/v1/bot/options/status`
+- `/api/v1/bot/options/config`
+- `/api/v1/bot/options/consent`
+- `/api/v1/bot/runtime-health`
+- `/api/v1/model/metadata`
+
+Important options-bot note:
+
+- the options bot is production-safe in paper mode
+- a reusable option contract resolution layer now exists for expiry, strike, CE/PE selection, premium estimation, Greeks, and broker symbol lookup
+- live options execution is still kept fail-safe by default until broker position and order normalization is fully validated end to end
+- this is intentional, so the app fails safe instead of pretending live options are ready
 
 ## Backend Deployment to Render
 
@@ -173,6 +231,7 @@ Important backend variables:
 | `ENABLE_LIVE_BROKER` | Enable backend broker connection | No |
 | `ENABLE_REPLAY_FALLBACK` | Replay fallback toggle | No |
 | `ENABLE_DEMO_MODE` | Demo-safe fallback toggle | No |
+| `AUTO_CONNECT_LIVE_FEED_ON_STARTUP` | Auto-connect live feed during backend startup | No |
 
 ## Demo Mode
 
@@ -245,6 +304,16 @@ cd stocktrader/frontend
 npm ci
 npx ng build --configuration production
 ```
+
+## Frontend UX
+
+The bot panel now includes:
+
+- `Equity Bot` tab
+- `Options Bot` tab
+- `Runtime Health` tab
+
+Most major sections also expose hover descriptions so first-time users can understand what each section does and how to use it.
 
 ## CI/CD
 

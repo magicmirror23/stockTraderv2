@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+
+from backend.api.main import app
 from backend.trading_engine.account_state import (
     AccountState,
     HoldingState,
@@ -271,3 +274,92 @@ def test_trade_execute_route_rejects_duplicate_position(auth_client, monkeypatch
     )
     assert execute.status_code == 422
     assert "pyramiding" in execute.json()["detail"].lower() or "position already exists" in execute.json()["detail"].lower()
+
+
+def test_trade_execute_route_rejects_when_live_price_is_unavailable(auth_client, monkeypatch):
+    from backend.api.routers import trade as trade_router
+
+    class FakeAdapter:
+        def fetch_account_state(self) -> AccountState:
+            return AccountState(
+                account_type="real",
+                available_cash=10000.0,
+                buying_power=10000.0,
+                total_equity=10000.0,
+                holdings={},
+                open_positions={},
+                open_orders=[],
+            )
+
+        def get_ltp(self, ticker: str) -> dict:
+            return {"ltp": 0.0, "ticker": ticker}
+
+        def place_order(self, order_intent: dict) -> dict:  # pragma: no cover - should never be called
+            raise AssertionError("place_order should not be called when price data is unavailable")
+
+    monkeypatch.setattr(trade_router, "_get_adapter", lambda: FakeAdapter())
+    create = auth_client.post(
+        "/api/v1/trade_intent",
+        json={"ticker": "INFY", "side": "buy", "quantity": 1, "order_type": "market"},
+    )
+    assert create.status_code == 201
+
+    execute = auth_client.post(
+        "/api/v1/execute",
+        json={"intent_id": create.json()["intent_id"]},
+    )
+    assert execute.status_code == 503
+    assert "live price unavailable" in execute.json()["detail"].lower()
+
+
+def test_trade_execute_route_surfaces_persistence_failure(monkeypatch):
+    from backend.api.routers import trade as trade_router
+    from backend.core.config import settings
+
+    class FakeAdapter:
+        def fetch_account_state(self) -> AccountState:
+            return AccountState(
+                account_type="real",
+                available_cash=10000.0,
+                buying_power=10000.0,
+                total_equity=10000.0,
+                holdings={},
+                open_positions={},
+                open_orders=[],
+            )
+
+        def get_ltp(self, ticker: str) -> dict:
+            return {"ltp": 100.0, "ticker": ticker}
+
+        def place_order(self, order_intent: dict) -> dict:
+            return {
+                "order_id": "broker-1",
+                "status": "filled",
+                "filled_price": 100.0,
+                "ticker": order_intent["ticker"],
+                "quantity": order_intent["quantity"],
+            }
+
+    monkeypatch.setattr(trade_router, "_get_adapter", lambda: FakeAdapter())
+    monkeypatch.setattr(
+        trade_router,
+        "_persist_execution",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("execution_persistence_failed")),
+    )
+
+    with TestClient(
+        app,
+        headers={"Authorization": f"Bearer {settings.SECRET_KEY}"},
+        raise_server_exceptions=False,
+    ) as client:
+        create = client.post(
+            "/api/v1/trade_intent",
+            json={"ticker": "INFY", "side": "buy", "quantity": 1, "order_type": "market"},
+        )
+        assert create.status_code == 201
+
+        execute = client.post(
+            "/api/v1/execute",
+            json={"intent_id": create.json()["intent_id"]},
+        )
+        assert execute.status_code == 500

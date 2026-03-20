@@ -1,0 +1,505 @@
+<div class="page">
+  <div class="hero">
+    <div>
+      <h1>Trading Automation</h1>
+      <p class="text-muted">
+        Production-style control center for equity automation, paper-safe options automation, and runtime health.
+      </p>
+    </div>
+    <div class="tab-row">
+      <button class="tab-btn" [class.active]="activeTab === 'equity'" (click)="setTab('equity')">Equity Bot</button>
+      <button class="tab-btn" [class.active]="activeTab === 'options'" (click)="setTab('options')">Options Bot</button>
+      <button class="tab-btn" [class.active]="activeTab === 'health'" (click)="setTab('health')">Runtime Health</button>
+    </div>
+  </div>
+
+  <div class="card mb-2 market-banner" [ngClass]="'market-' + (market?.phase || 'closed')" [attr.title]="sectionHelp.marketStatus">
+    <div class="flex justify-between items-center">
+      <div class="flex items-center gap-1">
+        <span class="market-dot" [ngClass]="{
+          'dot-open': market?.phase === 'open',
+          'dot-pre': market?.phase === 'pre_open',
+          'dot-closed': market?.phase !== 'open' && market?.phase !== 'pre_open'
+        }"></span>
+        <div>
+          <strong>{{ market?.message || 'Loading market status...' }}</strong>
+          <div class="text-sm text-muted">{{ market?.ist_now }}</div>
+        </div>
+      </div>
+      <div class="text-right">
+        <div class="text-sm">{{ market?.next_event }}</div>
+        <strong>{{ market?.next_event_time }}</strong>
+        <div class="countdown text-mono">{{ countdownStr }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-2" [attr.title]="sectionHelp.accountVerification">
+    <div class="flex justify-between items-center mb-1">
+      <div>
+        <h2>Account Verification</h2>
+        <div class="text-sm text-muted">Verify the current broker or paper account before you start automation.</div>
+      </div>
+      <button class="btn-primary btn-sm" (click)="loadAccount()" [disabled]="accountLoading">
+        {{ accountLoading ? 'Verifying...' : 'Verify Credentials' }}
+      </button>
+    </div>
+
+    <div *ngIf="!account" class="text-muted text-sm">No account snapshot loaded yet.</div>
+
+    <div *ngIf="account">
+      <div class="flex items-center gap-1 mb-1">
+        <span class="badge" [ngClass]="{
+          'badge-success': account.status === 'connected' || account.status === 'paper_mode',
+          'badge-warning': account.status === 'not_configured',
+          'badge-danger': account.status === 'login_failed' || account.status === 'error'
+        }">{{ account.status | uppercase }}</span>
+        <span class="text-sm">{{ account.message }}</span>
+      </div>
+
+      <div class="grid-3">
+        <div class="stat-card">
+          <div class="stat-label">Account Name</div>
+          <div class="stat-value">{{ account.name || 'Unknown' }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Client ID</div>
+          <div class="stat-value">{{ account.client_id || 'N/A' }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Available Balance</div>
+          <div class="stat-value text-success">Rs{{ (account.balance || 0) | number:'1.2-2' }}</div>
+        </div>
+      </div>
+
+      <div *ngIf="credentialsList.length" class="mt-1">
+        <div class="text-sm text-muted mb-05">Credentials Status</div>
+        <div class="flex gap-1 flex-wrap">
+          <span *ngFor="let cred of credentialsList" class="badge" [ngClass]="cred.set ? 'badge-success' : 'badge-danger'">
+            {{ cred.set ? 'OK' : 'Missing' }} {{ cred.key }}
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <ng-container *ngIf="activeTab === 'equity'">
+    <div class="content-grid">
+      <div class="card" [attr.title]="sectionHelp.equityBot">
+        <div class="section-heading">
+          <div>
+            <h2>Equity Bot Configuration</h2>
+            <div class="text-sm text-muted">Equity trades use fresh account state, live balance checks, and bot-side exits.</div>
+          </div>
+          <span class="badge" [ngClass]="equityBotStatus?.running ? 'badge-success' : 'badge-info'">
+            {{ equityBotStatus?.running ? 'RUNNING' : 'IDLE' }}
+          </span>
+        </div>
+
+        <div class="form-group">
+          <label>Watchlist (comma-separated)</label>
+          <input [(ngModel)]="equityWatchlistStr" placeholder="RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK" />
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Min Confidence</label>
+            <input type="number" [(ngModel)]="equityConfig.min_confidence" min="0.1" max="1" step="0.01" />
+          </div>
+          <div class="form-group">
+            <label>Max Positions</label>
+            <input type="number" [(ngModel)]="equityConfig.max_positions" min="1" max="20" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Position Size % of Cash</label>
+            <input type="number" [(ngModel)]="equityConfig.position_size_pct" min="0.01" max="1" step="0.01" />
+            <div class="text-sm text-muted">Current: {{ asPercent(equityConfig.position_size_pct) | number:'1.0-1' }}%</div>
+          </div>
+          <div class="form-group">
+            <label>Cycle Interval (sec)</label>
+            <input type="number" [(ngModel)]="equityConfig.cycle_interval" min="10" max="600" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Stop Loss %</label>
+            <input type="number" [(ngModel)]="equityConfig.stop_loss_pct" min="0.005" max="0.2" step="0.005" />
+          </div>
+          <div class="form-group">
+            <label>Take Profit %</label>
+            <input type="number" [(ngModel)]="equityConfig.take_profit_pct" min="0.01" max="0.4" step="0.01" />
+          </div>
+        </div>
+
+        <div class="hint-card" *ngIf="!isMarketOpen">
+          Market is closed. You can still start the bot now and it will wait in standby until the session opens.
+        </div>
+
+        <div *ngIf="equityBotStatus?.consent_pending" class="consent-banner">
+          <strong>Market reopened for Equity Bot</strong>
+          <div class="text-sm">Resume trading now, or let it auto-resume in {{ equityBotStatus?.auto_resume_in }}s.</div>
+          <div class="flex gap-1 mt-1">
+            <button class="btn-success" (click)="grantEquityConsent()">Resume</button>
+            <button class="btn-danger" (click)="declineEquityConsent()">Stop</button>
+          </div>
+        </div>
+
+        <div *ngIf="equityBotStatus?.paused && !equityBotStatus?.consent_pending && equityBotStatus?.running" class="paused-indicator">
+          Equity bot is paused and waiting for the next trading session.
+        </div>
+
+        <div class="flex gap-1 mt-1">
+          <button class="btn-success btn-lg" style="flex: 1" (click)="startEquityBot()" [disabled]="equityBotStatus?.running || equityStarting">
+            {{ equityStarting ? 'Starting...' : 'Start Equity Bot' }}
+          </button>
+          <button class="btn-danger btn-lg" style="flex: 1" (click)="stopEquityBot()" [disabled]="!equityBotStatus?.running || equityStopping">
+            {{ equityStopping ? 'Stopping...' : 'Stop Equity Bot' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="stack">
+        <div class="card" [attr.title]="sectionHelp.positions">
+          <div class="section-heading">
+            <h2>Equity Positions</h2>
+            <span class="badge badge-info">{{ equityPositions.length }} open</span>
+          </div>
+          <div *ngIf="equityPositions.length === 0" class="text-muted text-sm">No open equity bot positions.</div>
+          <div *ngFor="let position of equityPositions" class="position-row">
+            <div>
+              <strong>{{ position.key }}</strong>
+              <div class="text-sm text-muted">Qty {{ position.value.quantity }} · Entry Rs{{ position.value.entry_price | number:'1.2-2' }}</div>
+            </div>
+            <div class="text-right">
+              <div>Now Rs{{ position.value.current_price | number:'1.2-2' }}</div>
+              <div [ngClass]="position.value.pnl >= 0 ? 'text-success' : 'text-danger'">
+                PnL Rs{{ position.value.pnl | number:'1.2-2' }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="grid-4">
+            <div class="stat-card">
+              <div class="stat-label">Budget / Trade</div>
+              <div class="stat-value">Rs{{ (equityBotStatus?.position_budget || 0) | number:'1.0-0' }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Trades Today</div>
+              <div class="stat-value">{{ equityBotStatus?.trades_today?.length || 0 }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Cycles</div>
+              <div class="stat-value">{{ equityBotStatus?.cycle_count || 0 }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Net PnL</div>
+              <div class="stat-value" [ngClass]="(equityBotStatus?.net_pnl || 0) >= 0 ? 'text-success' : 'text-danger'">
+                Rs{{ (equityBotStatus?.net_pnl || 0) | number:'1.2-2' }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" [attr.title]="sectionHelp.tradeLog">
+          <h2>Equity Trade Log</h2>
+          <div *ngIf="!equityBotStatus?.trades_today?.length" class="text-muted text-sm">No equity trades yet.</div>
+          <table *ngIf="equityBotStatus?.trades_today?.length">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Ticker</th>
+                <th>Action</th>
+                <th>Qty</th>
+                <th>Price</th>
+                <th>Net PnL</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let trade of equityBotStatus!.trades_today">
+                <td class="text-mono text-sm">{{ trade.timestamp | date:'shortTime' }}</td>
+                <td><strong>{{ trade.ticker }}</strong></td>
+                <td>{{ trade.action }}</td>
+                <td>{{ trade.quantity }}</td>
+                <td>Rs{{ trade.price | number:'1.2-2' }}</td>
+                <td [ngClass]="(trade.net_pnl || 0) >= 0 ? 'text-success' : 'text-danger'">
+                  {{ trade.net_pnl != null ? ('Rs' + (trade.net_pnl | number:'1.2-2')) : '-' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card" *ngIf="equityBotStatus?.errors?.length" [attr.title]="sectionHelp.errors">
+          <h2>Equity Bot Errors</h2>
+          <div *ngFor="let error of equityBotStatus!.errors" class="text-sm text-danger error-row">{{ error }}</div>
+        </div>
+      </div>
+    </div>
+  </ng-container>
+
+  <ng-container *ngIf="activeTab === 'options'">
+    <div class="content-grid">
+      <div class="card" [attr.title]="sectionHelp.optionsBot">
+        <div class="section-heading">
+          <div>
+            <h2>Options Bot Configuration</h2>
+            <div class="text-sm text-muted">Single-leg long options automation using the underlying model signal plus contract selection rules.</div>
+          </div>
+          <span class="badge" [ngClass]="optionsBotStatus?.running ? 'badge-success' : 'badge-info'">
+            {{ optionsBotStatus?.running ? 'RUNNING' : 'IDLE' }}
+          </span>
+        </div>
+
+        <div class="warning-card" *ngIf="optionsBotStatus && !optionsBotStatus.runtime_health.current_mode_supported">
+          Current environment does not support live option execution. Keep PAPER_MODE enabled for this bot.
+        </div>
+
+        <div class="form-group">
+          <label>Underlying Watchlist (comma-separated)</label>
+          <input [(ngModel)]="optionsWatchlistStr" placeholder="NIFTY50, BANKNIFTY, RELIANCE, TCS" />
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Min Confidence</label>
+            <input type="number" [(ngModel)]="optionsConfig.min_confidence" min="0.1" max="1" step="0.01" />
+          </div>
+          <div class="form-group">
+            <label>Max Positions</label>
+            <input type="number" [(ngModel)]="optionsConfig.max_positions" min="1" max="10" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Premium Budget % of Cash</label>
+            <input type="number" [(ngModel)]="optionsConfig.position_size_pct" min="0.01" max="1" step="0.01" />
+            <div class="text-sm text-muted">Current: {{ asPercent(optionsConfig.position_size_pct) | number:'1.0-1' }}%</div>
+          </div>
+          <div class="form-group">
+            <label>Cycle Interval (sec)</label>
+            <input type="number" [(ngModel)]="optionsConfig.cycle_interval" min="10" max="600" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Option Bias</label>
+            <select [(ngModel)]="optionsConfig.option_bias">
+              <option value="both">Follow Signal</option>
+              <option value="calls_only">Calls Only</option>
+              <option value="puts_only">Puts Only</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Expiry Days</label>
+            <input type="number" [(ngModel)]="optionsConfig.expiry_days" min="1" max="30" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Strike Steps from ATM</label>
+            <input type="number" [(ngModel)]="optionsConfig.strike_steps_from_atm" min="0" max="5" />
+          </div>
+          <div class="form-group">
+            <label>Min Days to Expiry Exit</label>
+            <input type="number" [(ngModel)]="optionsConfig.min_days_to_expiry" min="0" max="10" />
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Stop Loss %</label>
+            <input type="number" [(ngModel)]="optionsConfig.stop_loss_pct" min="0.05" max="0.9" step="0.01" />
+          </div>
+          <div class="form-group">
+            <label>Take Profit %</label>
+            <input type="number" [(ngModel)]="optionsConfig.take_profit_pct" min="0.1" max="2" step="0.01" />
+          </div>
+        </div>
+
+        <div *ngIf="optionsBotStatus?.consent_pending" class="consent-banner">
+          <strong>Market reopened for Options Bot</strong>
+          <div class="text-sm">Resume options automation now, or let it auto-resume in {{ optionsBotStatus?.auto_resume_in }}s.</div>
+          <div class="flex gap-1 mt-1">
+            <button class="btn-success" (click)="grantOptionsConsent()">Resume</button>
+            <button class="btn-danger" (click)="declineOptionsConsent()">Stop</button>
+          </div>
+        </div>
+
+        <div class="flex gap-1 mt-1">
+          <button class="btn-success btn-lg" style="flex: 1" (click)="startOptionsBot()" [disabled]="optionsBotStatus?.running || optionsStarting">
+            {{ optionsStarting ? 'Starting...' : 'Start Options Bot' }}
+          </button>
+          <button class="btn-danger btn-lg" style="flex: 1" (click)="stopOptionsBot()" [disabled]="!optionsBotStatus?.running || optionsStopping">
+            {{ optionsStopping ? 'Stopping...' : 'Stop Options Bot' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="stack">
+        <div class="card" [attr.title]="sectionHelp.positions">
+          <div class="section-heading">
+            <h2>Options Positions</h2>
+            <span class="badge badge-info">{{ optionsPositions.length }} open</span>
+          </div>
+          <div *ngIf="optionsPositions.length === 0" class="text-muted text-sm">No open options bot positions.</div>
+          <div *ngFor="let position of optionsPositions" class="position-row">
+            <div>
+              <strong>{{ position.value.contract_label || position.key }}</strong>
+              <div class="text-sm text-muted">
+                Qty {{ position.value.quantity }} · Entry Rs{{ position.value.entry_price | number:'1.2-2' }}
+              </div>
+            </div>
+            <div class="text-right">
+              <div>Now Rs{{ position.value.current_price | number:'1.2-2' }}</div>
+              <div [ngClass]="position.value.pnl >= 0 ? 'text-success' : 'text-danger'">
+                PnL Rs{{ position.value.pnl | number:'1.2-2' }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="grid-4">
+            <div class="stat-card">
+              <div class="stat-label">Premium Budget</div>
+              <div class="stat-value">Rs{{ (optionsBotStatus?.position_budget || 0) | number:'1.0-0' }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Trades Today</div>
+              <div class="stat-value">{{ optionsBotStatus?.trades_today?.length || 0 }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Cycles</div>
+              <div class="stat-value">{{ optionsBotStatus?.cycle_count || 0 }}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Net PnL</div>
+              <div class="stat-value" [ngClass]="(optionsBotStatus?.net_pnl || 0) >= 0 ? 'text-success' : 'text-danger'">
+                Rs{{ (optionsBotStatus?.net_pnl || 0) | number:'1.2-2' }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" [attr.title]="sectionHelp.tradeLog">
+          <h2>Options Trade Log</h2>
+          <div *ngIf="!optionsBotStatus?.trades_today?.length" class="text-muted text-sm">No options trades yet.</div>
+          <table *ngIf="optionsBotStatus?.trades_today?.length">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Underlying</th>
+                <th>Contract</th>
+                <th>Action</th>
+                <th>Qty</th>
+                <th>Price</th>
+                <th>Net PnL</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let trade of optionsBotStatus!.trades_today">
+                <td class="text-mono text-sm">{{ trade.timestamp | date:'shortTime' }}</td>
+                <td><strong>{{ trade.ticker }}</strong></td>
+                <td>{{ trade.contract || '-' }}</td>
+                <td>{{ trade.action }}</td>
+                <td>{{ trade.quantity }}</td>
+                <td>Rs{{ trade.price | number:'1.2-2' }}</td>
+                <td [ngClass]="(trade.net_pnl || 0) >= 0 ? 'text-success' : 'text-danger'">
+                  {{ trade.net_pnl != null ? ('Rs' + (trade.net_pnl | number:'1.2-2')) : '-' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card" *ngIf="optionsBotStatus?.errors?.length" [attr.title]="sectionHelp.errors">
+          <h2>Options Bot Errors</h2>
+          <div *ngFor="let error of optionsBotStatus!.errors" class="text-sm text-danger error-row">{{ error }}</div>
+        </div>
+      </div>
+    </div>
+  </ng-container>
+
+  <ng-container *ngIf="activeTab === 'health'">
+    <div class="card" [attr.title]="sectionHelp.runtimeHealth">
+      <div class="section-heading">
+        <div>
+          <h2>Runtime Health</h2>
+          <div class="text-sm text-muted">Operational view of service mode, execution support, and bot readiness.</div>
+        </div>
+        <span class="badge badge-info">{{ runtimeHealth?.service_mode || 'loading' | uppercase }}</span>
+      </div>
+
+      <div class="grid-4">
+        <div class="stat-card">
+          <div class="stat-label">Service Mode</div>
+          <div class="stat-value">{{ runtimeHealth?.service_mode || '—' }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Run Mode</div>
+          <div class="stat-value">{{ runtimeHealth?.run_mode || '—' }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Paper Mode</div>
+          <div class="stat-value">{{ runtimeHealth?.paper_mode ? 'Yes' : 'No' }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Live Broker</div>
+          <div class="stat-value">{{ runtimeHealth?.live_broker_enabled ? 'Enabled' : 'Disabled' }}</div>
+        </div>
+      </div>
+
+      <div class="grid-2 mt-1">
+        <div class="panel">
+          <h3>Equity Bot Health</h3>
+          <div class="health-line"><span>Status</span><strong>{{ equityBotStatus?.running ? 'Running' : 'Idle' }}</strong></div>
+          <div class="health-line"><span>Account Mode</span><strong>{{ equityBotStatus?.runtime_health?.account_mode || '—' }}</strong></div>
+          <div class="health-line"><span>Last Cycle</span><strong>{{ equityBotStatus?.last_cycle ? (equityBotStatus!.last_cycle | date:'short') : '—' }}</strong></div>
+          <div class="health-line"><span>Last Signal Scan</span><strong>{{ equityBotStatus?.runtime_health?.last_signal_scan ? (equityBotStatus!.runtime_health.last_signal_scan | date:'short') : '—' }}</strong></div>
+          <div class="health-line"><span>Current Mode Supported</span><strong>{{ equityBotStatus?.runtime_health?.current_mode_supported ? 'Yes' : 'No' }}</strong></div>
+        </div>
+
+        <div class="panel">
+          <h3>Options Bot Health</h3>
+          <div class="health-line"><span>Status</span><strong>{{ optionsBotStatus?.running ? 'Running' : 'Idle' }}</strong></div>
+          <div class="health-line"><span>Paper Only</span><strong>{{ optionsBotStatus?.runtime_health?.paper_only ? 'Yes' : 'No' }}</strong></div>
+          <div class="health-line"><span>Live Supported</span><strong>{{ optionsBotStatus?.runtime_health?.live_execution_supported ? 'Yes' : 'No' }}</strong></div>
+          <div class="health-line"><span>Last Cycle</span><strong>{{ optionsBotStatus?.last_cycle ? (optionsBotStatus!.last_cycle | date:'short') : '—' }}</strong></div>
+          <div class="health-line"><span>Current Mode Supported</span><strong>{{ optionsBotStatus?.runtime_health?.current_mode_supported ? 'Yes' : 'No' }}</strong></div>
+        </div>
+      </div>
+
+      <div class="grid-2 mt-1">
+        <div class="panel">
+          <h3>Market Session</h3>
+          <div class="health-line"><span>Phase</span><strong>{{ runtimeHealth?.market?.phase || market?.phase || '—' }}</strong></div>
+          <div class="health-line"><span>Message</span><strong>{{ runtimeHealth?.market?.message || market?.message || '—' }}</strong></div>
+          <div class="health-line"><span>Next Event</span><strong>{{ runtimeHealth?.market?.next_event || market?.next_event || '—' }}</strong></div>
+          <div class="health-line"><span>Next Event Time</span><strong>{{ runtimeHealth?.market?.next_event_time || market?.next_event_time || '—' }}</strong></div>
+        </div>
+
+        <div class="panel">
+          <h3>Execution Notes</h3>
+          <div class="text-sm text-muted">
+            Equity automation can run in paper or live mode depending on current account settings.
+          </div>
+          <div class="text-sm text-muted mt-1">
+            Options automation currently uses a production-safe paper workflow unless live option contract support is available.
+          </div>
+          <div class="text-sm text-muted mt-1">
+            Both bots refresh cash, holdings, and open orders before trading so decisions are made on current account state.
+          </div>
+        </div>
+      </div>
+    </div>
+  </ng-container>
+</div>

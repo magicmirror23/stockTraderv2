@@ -9,8 +9,9 @@ import threading
 from typing import Any
 
 from backend.core.config import settings
-from backend.prediction_engine.model_features import MODEL_INPUT_COLUMNS
+from backend.prediction_engine.model_features import MODEL_INPUT_COLUMNS, feature_set_version
 from backend.prediction_engine.models.lightgbm_model import LightGBMModel
+from backend.services.audit_service import record_audit_event
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class ModelManager:
                     cls._instance._model_version = "demo-fallback"
                     cls._instance._last_error = None
                     cls._instance._last_loaded_version = None
+                    cls._instance._explainer = None
         return cls._instance
 
     @property
@@ -108,6 +110,7 @@ class ModelManager:
                 self._activate_demo_fallback(f"artifact_corrupt:{version}")
                 return self._model_version
 
+            self._explainer = None
             self._status = "loaded"
             self._last_error = None
             self._model_version = version
@@ -117,27 +120,63 @@ class ModelManager:
 
     def _activate_demo_fallback(self, reason: str) -> None:
         self._model = None
+        self._explainer = None
         self._status = "demo_fallback"
         self._last_error = reason
         self._model_version = "demo-fallback"
         logger.warning("Using demo prediction fallback", extra={"mode": "demo"})
+        record_audit_event(
+            "MODEL_FALLBACK_ACTIVATED",
+            entity_type="model",
+            entity_id=self._model_version,
+            data={"reason": reason},
+            source="model_manager",
+        )
 
     def get_model_info(self) -> dict[str, Any]:
+        metadata = self.get_model_metadata()
+        return {
+            "model_version": metadata["model_version"],
+            "status": metadata["status"],
+            "last_trained": metadata.get("last_trained"),
+            "accuracy": metadata.get("accuracy"),
+            "fallback": metadata.get("fallback"),
+            "last_error": metadata.get("last_error"),
+        }
+
+    def get_model_metadata(self) -> dict[str, Any]:
         registry = self._read_registry()
-        metrics = {}
-        last_trained = None
-        for entry in registry.get("models", []):
-            if entry.get("version") == self._last_loaded_version:
-                metrics = entry.get("metrics", {})
-                last_trained = entry.get("timestamp")
-                break
+        entry = self._loaded_registry_entry(registry)
+        metrics = dict(entry.get("metrics", {})) if entry else {}
+        loaded_version = entry.get("version") if entry else self._last_loaded_version
+        meta = self._read_meta(loaded_version)
+        calibration_score = metrics.get("calibration_score")
+        if calibration_score is None:
+            calibration_score = meta.get("calibration_score")
         return {
             "model_version": self._model_version,
             "status": self._status,
-            "last_trained": last_trained,
+            "last_trained": entry.get("timestamp") if entry else meta.get("saved_at"),
             "accuracy": metrics.get("test_accuracy"),
             "fallback": self._status == "demo_fallback",
             "last_error": self._last_error,
+            "registry_latest": registry.get("latest"),
+            "trained_model_available": bool(loaded_version and meta),
+            "artifact_path": str(settings.model_artifacts_path / loaded_version)
+            if loaded_version and meta
+            else None,
+            "feature_set_version": meta.get("feature_set_version") or feature_set_version(),
+            "feature_count": meta.get("feature_count") or len(MODEL_INPUT_COLUMNS),
+            "training_data_snapshot_id": self._training_snapshot_id(entry),
+            "calibration_status": meta.get("calibration_status")
+            or ("reported" if calibration_score is not None else "not_reported"),
+            "calibration_score": calibration_score,
+            "explainability_mode": meta.get("explainability_mode")
+            or ("shap_optional" if self._model is not None else "fallback_only"),
+            "mlflow_enabled": settings.has_mlflow,
+            "shap_enabled": self._shap_available(),
+            "signal_policy": self._signal_policy(metrics),
+            "metrics": metrics,
         }
 
     def predict(self, ticker: str, horizon_days: int = 1) -> dict[str, Any]:
@@ -157,7 +196,8 @@ class ModelManager:
                 quantity=1,
             )
             r = results[0]
-            explanation = self._build_prediction_explanation(ticker, feat_dict, r)
+            shap_drivers = self._shap_drivers(X, feat_dict)
+            explanation = self._build_prediction_explanation(ticker, feat_dict, r, shap_drivers=shap_drivers)
             return {
                 "action": r["action"],
                 "confidence": r["confidence"],
@@ -167,7 +207,7 @@ class ModelManager:
                 "calibration_score": r.get("calibration_score"),
                 "signal_policy": r.get("signal_policy"),
                 "explanation": explanation,
-                "shap_top_features": [driver["label"] for driver in explanation["drivers"]],
+                "shap_top_features": [driver["label"] for driver in (shap_drivers or explanation["drivers"])],
                 "fallback": False,
                 "close": float(feat_dict.get("close", 100.0)),
             }
@@ -181,6 +221,47 @@ class ModelManager:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
         return {"models": [], "latest": None}
+
+    def _loaded_registry_entry(self, registry: dict[str, Any]) -> dict[str, Any]:
+        for entry in registry.get("models", []):
+            if entry.get("version") == self._last_loaded_version:
+                return entry
+        return {}
+
+    def _read_meta(self, version: str | None) -> dict[str, Any]:
+        if not version:
+            return {}
+        path = settings.model_artifacts_path / version / "meta.json"
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to read model metadata for %s", version)
+            return {}
+
+    @staticmethod
+    def _training_snapshot_id(entry: dict[str, Any] | None) -> str | None:
+        if not entry:
+            return None
+        refresh = entry.get("data_refresh", {}) or {}
+        signature = {
+            "version": entry.get("version"),
+            "tickers_count": entry.get("tickers_count"),
+            "start_date": refresh.get("start_date"),
+            "end_date": refresh.get("end_date"),
+            "refreshed_count": len(refresh.get("refreshed", []) or []),
+        }
+        encoded = json.dumps(signature, sort_keys=True).encode("utf-8")
+        return hashlib.sha1(encoded).hexdigest()[:12]
+
+    @staticmethod
+    def _signal_policy(metrics: dict[str, Any]) -> dict[str, float | None]:
+        return {
+            "buy_threshold": ModelManager._safe_float(metrics.get("buy_threshold")),
+            "sell_threshold": ModelManager._safe_float(metrics.get("sell_threshold")),
+            "min_signal_confidence": ModelManager._safe_float(metrics.get("min_signal_confidence")),
+        }
 
     def _fallback_prediction(self, ticker: str, horizon_days: int) -> dict[str, Any]:
         seed = int(hashlib.sha256(f"{ticker}:{horizon_days}".encode("utf-8")).hexdigest()[:8], 16)
@@ -208,12 +289,19 @@ class ModelManager:
             "close": close,
         }
 
-    def _build_prediction_explanation(self, ticker: str, feat_dict: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    def _build_prediction_explanation(
+        self,
+        ticker: str,
+        feat_dict: dict[str, Any],
+        result: dict[str, Any],
+        *,
+        shap_drivers: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         action = str(result.get("action", "hold"))
         confidence = float(result.get("confidence", 0.0))
         expected_return = float(result.get("expected_return", 0.0))
         policy = result.get("signal_policy") or {}
-        drivers = self._top_drivers(feat_dict)
+        drivers = self._top_drivers(feat_dict, shap_drivers=shap_drivers)
         market_regime = self._market_regime(feat_dict)
         news_regime = self._news_regime(feat_dict)
         risk_flags = self._risk_flags(action, feat_dict, confidence, policy)
@@ -266,6 +354,7 @@ class ModelManager:
                     "value": round(expected_return, 4),
                     "direction": "neutral",
                     "insight": "This response is generated without a trained model artifact.",
+                    "contribution": None,
                 }
             ],
             "risk_flags": ["Train and load a live model to see real feature-based explanations."],
@@ -278,7 +367,15 @@ class ModelManager:
             },
         }
 
-    def _top_drivers(self, feat_dict: dict[str, Any]) -> list[dict[str, Any]]:
+    def _top_drivers(
+        self,
+        feat_dict: dict[str, Any],
+        *,
+        shap_drivers: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if shap_drivers:
+            return shap_drivers[:4]
+
         scored: list[tuple[float, str, float]] = []
         for feature, label in _FEATURE_LABELS.items():
             value = self._safe_float(feat_dict.get(feature))
@@ -296,6 +393,61 @@ class ModelManager:
                     "value": round(value, 4),
                     "direction": self._driver_direction(feature, value),
                     "insight": self._driver_insight(feature, value),
+                    "contribution": None,
+                }
+            )
+        return drivers
+
+    def _shap_available(self) -> bool:
+        try:
+            import shap  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    def _get_shap_explainer(self):
+        if self._explainer is not None:
+            return self._explainer
+        if self._model is None or getattr(self._model, "_model", None) is None:
+            return None
+        try:
+            import shap
+
+            self._explainer = shap.TreeExplainer(self._model._model)
+        except Exception as exc:
+            logger.debug("SHAP explainer unavailable: %s", exc)
+            self._explainer = False
+        return self._explainer if self._explainer is not False else None
+
+    def _shap_drivers(self, X: Any, feat_dict: dict[str, Any]) -> list[dict[str, Any]]:
+        explainer = self._get_shap_explainer()
+        if explainer is None:
+            return []
+        try:
+            shap_values = explainer.shap_values(X, check_additivity=False)
+            if isinstance(shap_values, list):
+                shap_values = shap_values[-1]
+            row = shap_values[0]
+        except Exception as exc:
+            logger.debug("SHAP contribution generation failed: %s", exc)
+            return []
+
+        ranked = sorted(
+            zip(X.columns, row),
+            key=lambda item: abs(float(item[1])),
+            reverse=True,
+        )
+        drivers: list[dict[str, Any]] = []
+        for feature, contribution in ranked[:4]:
+            value = self._safe_float(feat_dict.get(feature)) or 0.0
+            drivers.append(
+                {
+                    "feature": feature,
+                    "label": _FEATURE_LABELS.get(feature, feature.replace("_", " ").title()),
+                    "value": round(value, 4),
+                    "direction": self._driver_direction(feature, value),
+                    "insight": self._driver_insight(feature, value),
+                    "contribution": round(float(contribution), 6),
                 }
             )
         return drivers

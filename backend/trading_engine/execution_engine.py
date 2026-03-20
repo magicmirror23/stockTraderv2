@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from backend.services.audit_service import record_audit_event
 from backend.trading_engine.account_state import (
     AccountState,
     TradeValidationResult,
@@ -24,6 +25,7 @@ class ExecutionContext:
     account_state_before: AccountState
     account_state_after: AccountState
     broker_result: dict[str, Any] | None = None
+    risk_decision: Any | None = None
 
 
 class AccountStateExecutionEngine:
@@ -37,6 +39,10 @@ class AccountStateExecutionEngine:
         adapter: Any,
         order_intent: Mapping[str, Any],
         current_price: float,
+        *,
+        risk_manager: Any | None = None,
+        expected_return_pct: float | None = None,
+        stop_loss_pct: float | None = None,
     ) -> ExecutionContext:
         before_state = fetch_real_account_state(adapter)
         validation = validate_trade_against_account_state(
@@ -54,7 +60,40 @@ class AccountStateExecutionEngine:
                 account_state_before=before_state,
                 account_state_after=before_state,
                 broker_result=None,
+                risk_decision=None,
             )
+
+        risk_decision = None
+        if risk_manager is not None:
+            risk_manager.sync_account_state(before_state)
+            risk_decision = risk_manager.validate_order(
+                order_intent,
+                before_state,
+                current_price=current_price,
+                expected_return_pct=expected_return_pct,
+                stop_loss_pct=stop_loss_pct,
+            )
+            if not risk_decision.allowed:
+                record_audit_event(
+                    "RISK_CHECK_FAILED",
+                    entity_type="order",
+                    entity_id=str(order_intent.get("ticker") or ""),
+                    data={
+                        "order_intent": dict(order_intent),
+                        "decision": risk_decision.to_dict(),
+                    },
+                    source="execution_engine",
+                )
+                return ExecutionContext(
+                    accepted=False,
+                    status="rejected",
+                    reason=risk_decision.reason,
+                    validation=validation,
+                    account_state_before=before_state,
+                    account_state_after=before_state,
+                    broker_result=None,
+                    risk_decision=risk_decision,
+                )
 
         try:
             broker_result = adapter.place_order({**dict(order_intent), "current_price": current_price})
@@ -67,10 +106,13 @@ class AccountStateExecutionEngine:
                 account_state_before=before_state,
                 account_state_after=before_state,
                 broker_result={"status": "error", "detail": str(exc)},
+                risk_decision=risk_decision,
             )
         status = str(broker_result.get("status") or "unknown").lower()
         accepted = status not in {"failed", "rejected", "error"}
         after_state = fetch_real_account_state(adapter)
+        if accepted and risk_manager is not None:
+            risk_manager.sync_account_state(after_state)
         return ExecutionContext(
             accepted=accepted,
             status=status,
@@ -79,6 +121,7 @@ class AccountStateExecutionEngine:
             account_state_before=before_state,
             account_state_after=after_state,
             broker_result=broker_result,
+            risk_decision=risk_decision,
         )
 
     def validate_paper_order(
@@ -86,7 +129,11 @@ class AccountStateExecutionEngine:
         account: Any,
         order_intent: Mapping[str, Any],
         current_price: float,
-    ) -> tuple[AccountState, TradeValidationResult]:
+        *,
+        risk_manager: Any | None = None,
+        expected_return_pct: float | None = None,
+        stop_loss_pct: float | None = None,
+    ) -> tuple[AccountState, TradeValidationResult, Any | None]:
         before_state = fetch_paper_account_state(account)
         validation = validate_trade_against_account_state(
             order_intent,
@@ -94,4 +141,34 @@ class AccountStateExecutionEngine:
             current_price=current_price,
             rules=self.validation_rules,
         )
-        return before_state, validation
+        risk_decision = None
+        if validation.allowed and risk_manager is not None:
+            risk_manager.sync_account_state(before_state)
+            risk_decision = risk_manager.validate_order(
+                order_intent,
+                before_state,
+                current_price=current_price,
+                expected_return_pct=expected_return_pct,
+                stop_loss_pct=stop_loss_pct,
+            )
+            if not risk_decision.allowed:
+                record_audit_event(
+                    "RISK_CHECK_FAILED",
+                    entity_type="paper_order",
+                    entity_id=str(order_intent.get("ticker") or ""),
+                    data={
+                        "order_intent": dict(order_intent),
+                        "decision": risk_decision.to_dict(),
+                    },
+                    source="execution_engine",
+                )
+                validation = TradeValidationResult(
+                    allowed=False,
+                    reason=risk_decision.reason,
+                    code=risk_decision.code,
+                    account_state=before_state,
+                    normalized_quantity=int(order_intent.get("quantity") or 0),
+                    available_cash=before_state.available_cash,
+                    held_quantity=before_state.held_quantity(str(order_intent.get("ticker") or "")),
+                )
+        return before_state, validation, risk_decision

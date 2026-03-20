@@ -121,11 +121,14 @@ class PriceFeed:
 
     def warm(self) -> dict[str, Any]:
         self._mode = "waking"
-        if settings.live_broker_enabled and self.is_market_open:
+        if settings.live_feed_autoconnect_on_startup and settings.live_broker_enabled and self.is_market_open:
             logger.info("Attempting broker warmup", extra={"mode": "live"})
             live_status = self._angel.start(self.default_watchlist())
             self._mode = live_status.get("mode", "replay")
             self._last_error = live_status.get("last_error")
+        elif settings.live_broker_enabled and self.is_market_open:
+            self._mode = "replay" if settings.replay_enabled else "unavailable"
+            self._last_error = None
         elif settings.live_broker_enabled and not self.is_market_open:
             self._mode = "replay" if settings.replay_enabled else "unavailable"
             self._last_error = "market_closed_last_close_mode"

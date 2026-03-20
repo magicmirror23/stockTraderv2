@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from backend.api.schemas import (
+    ModelMetadataResponse,
     ModelReloadRequest,
     ModelReloadResponse,
     ModelStatusResponse,
@@ -23,7 +24,16 @@ async def model_status():
         status=info["status"],
         last_trained=info.get("last_trained"),
         accuracy=info.get("accuracy"),
+        fallback=bool(info.get("fallback")),
+        last_error=info.get("last_error"),
     )
+
+
+@router.get("/metadata", response_model=ModelMetadataResponse)
+async def model_metadata():
+    mgr = ModelManager()
+    info = mgr.get_model_metadata()
+    return ModelMetadataResponse(**info)
 
 
 @router.post("/reload", response_model=ModelReloadResponse)
